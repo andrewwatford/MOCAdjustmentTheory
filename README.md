@@ -1,6 +1,6 @@
-# MOC Adjustment Model
+# MOC Adjustment Theory
 
-`moc-adjustment-model` will provide modular reduced-gravity models of
+`moc-adjustment-theory` will provide modular reduced-gravity models of
 meridional-overturning-circulation adjustment in connected ocean basins.
 
 The repository is currently in its documentation-first setup phase. The only
@@ -12,7 +12,7 @@ reviewed.
 
 ```bash
 python -m pip install .
-python -m moc_adjustment_model
+python -m moc_adjustment_theory
 ```
 
 ## Install for development
@@ -26,7 +26,7 @@ python -m mkdocs build --strict
 ## Temporary API
 
 ```python
-from moc_adjustment_model import hello_world
+from moc_adjustment_theory import hello_world
 
 assert hello_world() == "Hello, world!"
 ```

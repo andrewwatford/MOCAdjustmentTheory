@@ -1,6 +1,6 @@
-site_name: MOC Adjustment Model
+site_name: MOC Adjustment Theory
 site_description: Modular models of meridional-overturning-circulation adjustment
-repo_url: https://github.com/andrewwatford/MOCAdjustmentModel
+repo_url: https://github.com/andrewwatford/MOCAdjustmentTheory
 
 theme:
   name: material

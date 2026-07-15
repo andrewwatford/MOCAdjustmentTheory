@@ -1,4 +1,4 @@
-"""Modular models of meridional-overturning-circulation adjustment."""
+"""Modular theory of meridional-overturning-circulation adjustment."""
 
 from .hello import hello_world
 

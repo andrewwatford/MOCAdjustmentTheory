@@ -2,7 +2,7 @@
 
 import pytest
 
-from moc_adjustment_model import hello_world
+from moc_adjustment_theory import hello_world
 
 
 def test_hello_world_default() -> None:
