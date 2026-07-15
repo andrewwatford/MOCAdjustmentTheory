@@ -1,3 +1,6 @@
+# Codex scratch space
+codex_scratch/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +219,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS filesystem metadata
+.DS_Store
+
+# Large, local-only scientific inputs. Keep only the directory marker in Git.
+data/untracked/**
+!data/untracked/.gitkeep
