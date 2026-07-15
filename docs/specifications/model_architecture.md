@@ -8,12 +8,12 @@ implementation yet.
 
 The first scientific release will support two deliberate model facades:
 
-1. `GlobalNoITFModel`, representing three physical oceans as the five
-   dynamical regions in the non-Indonesian-Throughflow derivation.
-2. `AtlanticOnlyModel`, representing the single Atlantic region from Cape
+1. `GlobalModel`, representing the five dynamical sectors in the
+   non-Indonesian-Throughflow derivation.
+2. `AtlanticModel`, representing the single Atlantic region from Cape
    Agulhas to the northern observing line.
 
-They will share geometry, wind, Fourier, response-kernel, solving, and
+They will share geometry, wind, Fourier, regional `F`/`r`, solving, and
 diagnostic components. They will not initially expose an unrestricted graph
 compiler. The global graph is scientifically fixed enough that accepting
 arbitrary topologies would add validation burden before there is a tested use
@@ -23,36 +23,39 @@ explicit, preserve child order, and leave a path to later generalization.
 The central separation is:
 
 ```text
-source data -> validated geometry and forcings -> frequency operators
-            -> model-specific linear system -> labelled solution diagnostics
+source data -> validated geometry and forcing anomalies
+            -> Fourier transform and regional F/r calculations
+            -> model-specific linear system
+            -> labelled time-domain solution and diagnostics
 ```
 
 Geometry contains no forcing. Forcing contains no solved state. Model facades
-own the model-specific equations and compile them in response to typed forcing
-prescriptions. Diagnostics derive from one solved state and the same operators
-used in the solve.
+own the model-specific equations and assemble them from the supplied forcing
+prescriptions. The Fourier step transforms the common time record; the regional
+step computes the wind-forcing term `F` and geometric response factor `r`; the
+model step solves for the independent eastern-boundary thicknesses; and the
+diagnostic step reconstructs transports and thicknesses before transforming
+them back to time. Diagnostics derive from one solved state and the same
+regional calculations used in the solve.
 
 ## 2. Terminology and sign conventions
 
 These terms are normative.
 
-- A **physical ocean** is the Atlantic, Indian, or Pacific.
 - A **region** is one of the five latitude-bounded dynamical domains used by
-  the global equations. The global model has three physical oceans but five
-  regions.
-- `x_w(y)` and `x_e(y)` are the six source bathymetric western and eastern
-  shelf/isobath traces.
-- `x_b(y)` is the offshore, interior edge of the unresolved western boundary
-  current (WBC) region. It is physically distinct from `x_w`, even when a thin
-  WBC approximation uses `x_b approximately x_w`.
+  the global equations. The five regions are sectors of one connected model
+  ocean.
+- `x_b(y)` and `x_e(y)` are the isobath-derived western and eastern limits of
+  the Rossby-wave interior. This project closes the theory with a negligibly
+  narrow western-boundary-current (WBC) region, so it does not carry a separate
+  western-wall coordinate.
 - `h_e` is the eastern-boundary active-layer thickness anomaly.
 - `h_b = h(x_b, y, t)` is the interior thickness immediately outside the WBC
-  region, obtained from the Rossby-characteristic solution. It is not the
-  thickness at the western wall.
+  region, obtained from the Rossby-characteristic solution.
 - `h_w` is the thickness at the western boundary inferred from geostrophic
   transport. It is not a "westward-propagating thickness."
-- `T` is total northward transport and `T_tilde = T - T_Ek` is non-Ekman
-  northward transport.
+- `T`, `T_g`, and `T_Ek` are total, geostrophic, and Ekman northward
+  transports, respectively.
 - Graph arrows and positive connection transports point northward.
 - Longitude and latitude are degrees east and degrees north at public
   boundaries. Metric integrals use radians and spherical scale factors.
@@ -63,11 +66,11 @@ These terms are normative.
 The relations
 
 $$
-T = \widetilde T + T_{Ek},
+T = T_g + T_{Ek},
 \qquad
-\widetilde T = \frac{g'H}{f}(h_e-h_w),
+T_g = \frac{g'H}{f}(h_e-h_w),
 \qquad
-h_w = h_e-\frac{f\widetilde T}{g'H}
+h_w = h_e-\frac{fT_g}{g'H}
 $$
 
 must hold under the documented sign convention.
@@ -78,39 +81,41 @@ Let the junction latitudes satisfy
 
 $$y_S < y_P < y_I < y_N.$$
 
-The initial values used in the source work are approximately `y_S=-56`,
-`y_P=-44`, `y_I=-35`, and `y_N=55` degrees north, but these are explicit
-configuration values rather than hard-coded constants.
+The initial release uses the documented latitude convention `y_S=-56`,
+`y_P=-44`, `y_I=-35`, and `y_N=55` degrees north. A non-default geometry must
+state different values explicitly; gateways are never inferred independently
+for adjacent regions.
 
 | ID | Public key | Latitude domain | Western trace | Eastern trace |
 |---:|---|---|---|---|
 | 1 | `atlantic_north` | `y_I` to `y_N` | Atlantic west | Atlantic east |
 | 2 | `indian_north` | `y_I` to `y_NI` | Indian west | Indian east |
 | 3 | `pacific_north` | `y_P` to `y_NP` | Pacific west | Pacific east |
-| 4 | `indo_atlantic` | `y_P` to `y_I` | Atlantic west | Indian east |
-| 5 | `atlantic_pacific` | `y_S` to `y_P` | Atlantic west | Pacific east |
+| 4 | `atlantic_indian_transition` | `y_P` to `y_I` | Atlantic west | Indian east |
+| 5 | `atlantic_pacific_transition` | `y_S` to `y_P` | Atlantic west | Pacific east |
 
 Regions are views assembled from six shared physical traces, not five
-independently extracted contours. `y_NI` and `y_NP` are the northern limits of
-the closed Indian and Pacific regions and may differ from `y_N`.
+independently extracted contours. The closed-basin convention is deterministic:
+`y_NI` and `y_NP` are the northernmost sampled latitudes at or south of `y_N`
+where both of that basin's boundary traces are finite. The selected latitude is
+stored in the topology and used by both geometry and forcing calculations.
 
-Configuration distinguishes a requested physical boundary from its sampled
-model-grid boundary. A region's usable domain is the intersection of its
-requested interval and the finite coverage of its west, `x_b`, and east
-traces. Shared gateways must remain common to parent and children within a
-reviewed tolerance; otherwise geometry validation fails. At an outer closure,
-the forcing adapter may use the first or last included wind-grid row and
-records both latitudes. This makes a change from one valid isobath product to
-another robust to sub-grid endpoint differences without silently moving an
-internal gateway.
+Each basin records requested southern and northern latitudes. The geometry
+sampler first verifies that both `x_b` and `x_e` cover that interval, then maps
+the boundaries to forcing-grid rows. At an internal gateway, the adjoining
+basins must use one shared physical latitude and one shared sampled row;
+otherwise validation fails. At an external northern or southern closure, the
+sampled row may differ slightly from the requested latitude, and both values
+are recorded. An internal gateway is never moved silently to accommodate a
+particular bathymetry or wind grid.
 
 ### 3.1 Directed topology
 
 ```mermaid
 flowchart BT
-    S["External south"] --> R5["5: Atlantic-Pacific"]
+    S["External south"] --> R5["5: Atlantic-Pacific transition"]
     R5 -->|"Pacific branch T_P"| R3["3: Pacific north"]
-    R5 -->|"Transition T_T"| R4["4: Indo-Atlantic"]
+    R5 -->|"Transition T_T"| R4["4: Atlantic-Indian transition"]
     R4 -->|"Indian branch T_I"| R2["2: Indian north"]
     R4 -->|"Atlantic continuation T_A"| R1["1: Atlantic north"]
     R1 --> N["External north"]
@@ -118,7 +123,7 @@ flowchart BT
 
 The required east-to-west child orders are:
 
-- region 5: `[pacific_north, indo_atlantic]`;
+- region 5: `[pacific_north, atlantic_indian_transition]`;
 - region 4: `[indian_north, atlantic_north]`.
 
 The first child is the eastern child and shares its eastern-boundary thickness
@@ -151,40 +156,42 @@ regional volume budgets.
 
 Region 1 has the prescribed northern transport. Regions 2 and 3 have solid
 northern boundaries. The global southern transport is wind-driven in the
-total-transport formulation and zero after consistent conversion to the
-non-Ekman formulation.
+model formulation.
 
-### 3.2 Physical-ocean views
+### 3.2 Atlantic view
 
-A physical ocean is not always a graph node. The global Atlantic diagnostic is
-the ordered path
+The initial package does not attempt to define a generic `PhysicalOcean`
+abstraction. For this project, an ocean is identified by its eastern boundary,
+and the only cross-region ocean diagnostic required initially is the Atlantic.
+Its eastern boundary follows the ordered sectors
 
 ```text
-atlantic_pacific -> indo_atlantic -> atlantic_north
+atlantic_pacific_transition -> atlantic_indian_transition -> atlantic_north
 ```
 
-with branch jumps at `y_P` and `y_I`. This should be represented by an
-`OceanPath` or `CompositeOceanView` that references regions and connections.
-It must not duplicate state or interpolate blindly across a gateway. Indian
-and Pacific views are defined similarly from the graph.
+with branch junctions at `y_P` and `y_I`. A small `AtlanticView` references
+those regions and the solved connection transports; it does not duplicate
+state or interpolate across a gateway. Regions 2 and 3 remain available as
+regional Indian and Pacific diagnostics. A generic union of regions into
+additional named oceans is outside the initial implementation.
 
-## 4. Atlantic-only model
+## 4. Atlantic model
 
-The Atlantic-only facade uses one region, normally from `-35` to `55` degrees
-north, with Atlantic `x_w(y)`, `x_b(y)`, and `x_e(y)` throughout. It has no
+The Atlantic facade uses one region, normally from `-35` to `55` degrees
+north, with Atlantic `x_b(y)` and `x_e(y)` throughout. It has no
 step changes and no Indian or Pacific branch transports. Its southern closure
 is
 
 $$
 h_w(y_S,t)=0,
 \qquad
-\widetilde T_S(t)=\frac{g'H}{f_S}h_e(t).
+T_{g,S}(t)=\frac{g'H}{f_S}h_e(t).
 $$
 
-This is the boundary condition from which the scalar system in Section 8.3 is
+This is the boundary condition from which the scalar system in Section 8.2 is
 derived; it is not a global-model southern closure applied to one graph node.
 
-It reuses the same trace objects, physical parameters, wind operator, Fourier
+It reuses the same trace objects, model parameters, wind calculations, Fourier
 plan, and diagnostics as the global model. It has a distinct southern closure
 and therefore a distinct model-specific linear system; it should not be
 implemented by constructing a malformed one-node instance of the global
@@ -193,12 +200,23 @@ five-region equations.
 The public configuration switch should be explicit:
 
 ```python
-global_model = GlobalNoITFModel(geometry=global_geometry, physics=physics)
-atlantic_model = AtlanticOnlyModel(
-    geometry=global_geometry.atlantic_only(),
-    physics=physics,
+global_model = GlobalModel(
+    topology=global_topology,
+    reduced_gravity=g_prime,
+    reference_density=rho0,
+    layer_depth=H,
+)
+atlantic_model = AtlanticModel(
+    basin=global_topology.basin("atlantic_north"),
+    reduced_gravity=g_prime,
+    reference_density=rho0,
+    layer_depth=H,
 )
 ```
+
+There is no separate `physics` object in the initial API. The small set of
+required scalar parameters is supplied directly to each model; a shared
+configuration helper can be introduced later if repeated use warrants it.
 
 ## 5. Public forcing contract
 
@@ -213,31 +231,35 @@ A `WindStressAnomaly` validates:
 - a common, strictly increasing time coordinate;
 - one-dimensional latitude and longitude coordinates with an explicit
   convention. Input may be a cyclic global grid or a monotone unwrapped grid
-  that covers the geometry; the wind operator normalizes it to a declared
+  that covers the geometry; the wind calculation normalizes it to a declared
   continuous working frame;
 - dimensions and finite values;
-- dynamic (`N m-2`) or kinematic (`m2 s-2`) stress units;
-- whether and how the time mean was removed;
-- provenance, source record, interpolation, and taper configuration.
+- dynamic stress units (`N m-2`);
+- provenance describing how the anomaly was formed, the source record, and
+  interpolation.
 
-The normal preparation path computes the anomaly over the exact common model
-record before any curl or transport integral. For a SCOTIA/ERA5 experiment,
-this means removing the time mean over their common record while retaining the
-seasonal cycle. Precomputed `w_Ek` may be accepted only as an internal cache or
-advanced low-level operator input; it is not the primary user interface.
+The object already contains anomalies; the model does not remove another mean.
+Data adapters are responsible for placing all forcing anomalies on the exact
+common model interval before constructing the forcing objects. For a
+SCOTIA/ERA5 experiment, the adapter removes each source's mean over that common
+record while retaining the seasonal cycle. Precomputed `w_Ek` may be accepted
+only as an internal cache or advanced low-level input; it is not the primary
+user interface.
 
-The operator immediately converts dynamic stress to the canonical kinematic
-stress
+The wind calculation converts dynamic stress to kinematic stress internally,
+using the reference density supplied to `GlobalModel` or `AtlanticModel`
+together with the reduced gravity and layer depth:
 
 $$
 \boldsymbol\tau'_k=\boldsymbol\tau'_{dynamic}/\rho_0.
 $$
 
 All equations below use `tau_k` and therefore contain no further factor of
-`rho0`. The normalized field and original units are both recorded so a later
-operator cannot accidentally divide by density twice.
+`rho0`. Kinematic stress is not accepted at the public input boundary. The
+converted field and original units are both recorded so density cannot be
+applied twice.
 
-The wind operator derives, with one shared regularization,
+The wind calculation derives, with one shared regularization,
 
 $$
 I_\gamma(f)=\frac{f}{f^2+\gamma^2},
@@ -257,25 +279,26 @@ and
 
 $$
 T'_{Ek}(y)
-=-\int_{x_w}^{x_e}\tau'_{k,x} I_\gamma\,dx.
+=-\int_{x_b}^{x_e}\tau'_{k,x} I_\gamma\,dx.
 $$
 
-Section transport and local Ekman transport use the full section from `x_w`
-to `x_e`. Rossby-interior operators use `x_b` to `x_e`. A thin-WBC run may
-make those limits numerically equal, but only through the explicit
-`x_b = x_w` approximation.
+Section transport, local Ekman transport, and the Rossby-interior calculation
+all use `x_b` to `x_e`, consistently with the thin-WBC closure adopted by this
+project.
 
-Stress is tapered before taking the curl. It goes to zero on solid lateral
-sidewalls and on the closed northern boundaries of the Indian and Pacific.
-On a sampled forcing grid, the northern taper reaches zero at the last
-included latitude row rather than requiring the physical closure latitude to
-be an exact coordinate. The three step-shaped Atlantic regions are
-differentiated separately so that topological taper discontinuities do not
-create artificial wind-curl sheets.
+Spatial stress tapering is disabled by default. If explicitly enabled, a
+raised-cosine taper with a default width of 2 degrees takes stress to zero on
+solid lateral sidewalls and on the closed northern boundaries of the Indian
+and Pacific before the curl is taken. On a sampled forcing grid, the northern
+taper reaches zero at the last included latitude row rather than requiring the
+physical closure latitude to be an exact coordinate. The choice and width are
+recorded. In either case, the three step-shaped Atlantic regions are
+differentiated separately so that mask discontinuities do not create
+artificial wind-curl sheets.
 
 ### 5.2 Independent regional forcing
 
-`RegionForcingSet` contains one replaceable wind-stress prescription for each
+`BasinForcingSet` contains one replaceable wind-stress prescription for each
 of the five global regions. A region may:
 
 - use the default geometry-masked view of one global stress field;
@@ -285,18 +308,17 @@ of the five global regions. A region may:
 
 The absence of a region prescription is an error unless a named default policy
 fills it. This prevents an omitted forcing from being silently treated as
-zero. Region masks and tapers belong to the wind operator configuration, not
+zero. Region masks and tapers belong to the wind configuration, not
 to the raw stress data.
 
 Regional replaceability does not permit two values for one shared gateway.
-Before response operators are evaluated, the forcing set constructs one
-canonical composite wind field and one `GatewayWindView` for every shared
-face. The default field owns all interfaces. If separate regional datasets or
-scalings are supplied, the configuration must either:
+Before `F` and `r` are evaluated, the forcing set constructs one canonical
+composite wind field. The default field owns all interfaces. If separate
+regional datasets or scalings are supplied, the configuration must either:
 
 1. name the region that owns each gateway value; or
 2. demonstrate that both prescriptions agree there within a declared
-   tolerance after interpolation, normalization, tapering, and
+   tolerance after interpolation, conversion, optional tapering, and
    regularization.
 
 For the fixed graph, the Indian and Pacific branch-section Ekman transports
@@ -305,24 +327,28 @@ equation touching that gateway. Incompatible parent and child values are an
 error, never averaged silently. This preserves a unique `T_I,Ek` and
 `T_P,Ek`.
 
-The discrete wind operator must also satisfy, for each region and using the
-same grid, mask, metric, taper, and regularization,
+The discrete wind calculation must also satisfy, for each region and using the
+same grid, mask, metric, taper choice, and regularization,
 
 $$
-\int_{y_S}^{y_N}p_j\,dy
+\int_{y_S}^{y_N}\int_{x_b}^{x_e}w_{Ek,j}\,dx\,dy
 =T_{Ek,j}(y_N)-T_{Ek,j}(y_S)
 $$
 
-to numerical tolerance. This discrete divergence/face-transport identity is
-required for cancellation of the explicit `p` terms in the `Q/K` system.
+to numerical tolerance. This is the discrete divergence theorem applied to
+the same section transports used in the regional volume budget; no auxiliary
+public integral types are introduced.
 
-External transport prescriptions are typed as `total` or `non_ekman`. A total
-transport is converted using the local Ekman transport derived from the same
-wind-stress anomaly field. The conversion and sign are recorded in output
-metadata. This is essential for the SCOTIA northern-boundary ambiguity and for
-equivalence between the two equation forms below.
+The default northern prescription is total transport; the Atlantic example
+uses the SCOTIA total transport. A directly specified geostrophic or Ekman
+series may be supplied for a named decomposition experiment, but the model
+never infers geostrophic transport by subtracting an ERA5 Ekman estimate from
+total transport. Components and signs are recorded in output metadata, and no
+unlabelled residual transport is exposed. ERA5 northern Ekman transport may be
+diagnosed but is not dynamically substituted for the prescribed northern
+transport.
 
-`AtlanticOnlyModel` accepts one Atlantic stress prescription and the Atlantic
+`AtlanticModel` accepts one Atlantic stress prescription and the Atlantic
 northern transport. It rejects five-region keys rather than ignoring them.
 The two facades may share forcing value objects, but they do not pretend to
 have identical forcing schemas.
@@ -332,9 +358,10 @@ have identical forcing schemas.
 A `FourierPlan` owns all temporal preprocessing so every forcing uses exactly
 the same convention:
 
-1. intersect source records and resample onto one uniform time axis;
-2. form anomalies on that common interval;
-3. reflect `n-1` samples at each end of an `n`-sample record;
+1. require forcing objects that already share one uniform time axis and already
+   contain anomalies formed over that common interval;
+2. treat every anomaly as exactly zero outside the common record;
+3. add at least `n-1` zeros before and after an `n`-sample record;
 4. choose `n_fft >= 3n-2`, with optional additional zero padding;
 5. use `omega = 2*pi*rfftfreq(n_fft, d=dt)`;
 6. solve nonnegative frequencies;
@@ -342,18 +369,18 @@ the same convention:
 8. reconstruct with `irfft`, crop the original central interval, and remove
    only floating-point residual means.
 
-Reflection and cropping prevent the periodic FFT assumption from connecting
-the first and last observations directly. The plan records original and
-padded indices, cadence, reflection length, `n_fft`, and frequency units.
+Zero extension and cropping prevent the periodic FFT assumption from connecting
+the first and last observations directly and state the intended forcing outside
+the observed interval. The plan records original and padded indices, cadence,
+zero-padding lengths, `n_fft`, and frequency units. Reflection is not used.
 
 The Nyquist policy must be explicit. Both even and odd padded lengths are
 allowed. An even-length plan must prove that the standalone real-valued
-Nyquist coefficient and operator projection preserve a real inverse transform;
-the coefficient must not be silently dropped. The current operational
-prototype uses an even length, while the smallest valid reflected length may
-have either parity.
+Nyquist coefficient and response calculation preserve a real inverse transform;
+the coefficient must not be silently dropped. The padded length may have either
+parity.
 
-## 7. Region response operators
+## 7. Regional `F` and `r` terms
 
 The shared interior dynamics are
 
@@ -365,9 +392,11 @@ c(y)=\min\left(\frac{\beta g'H}{f^2},
 $$
 
 Let `phi_c` be the latitude where the uncapped Rossby speed first reaches the
-gravity-wave cap. The default Ekman regularization is tied to the same
-transition, `gamma = abs(f(phi_c))`; an override must be explicit in
-provenance. For canonical kinematic stress on a sphere,
+gravity-wave cap. The initial computational convention is
+`gamma = abs(f(phi_c))`. This is the default needed for a working equatorial
+calculation, but remains scientifically provisional: issue #7 must justify or
+replace it. All runs record `phi_c`, `gamma`, and the regularization formula.
+For canonical kinematic stress on a sphere,
 
 $$
 w'_{Ek}=\frac{1}{R\cos\phi}
@@ -395,12 +424,9 @@ P_j(\omega,x,y)
 =1-e^{-i\omega(x-x_b^{(j)})/c},
 $$
 
-For a finite unresolved WBC strip, define
-
 $$
 F_j=-\int_{y_{Sj}}^{y_{Nj}}\left[
-\int_{x_w}^{x_b}\widehat w_{Ek,j}\,dx
-+\int_{x_b}^{x_e}P_j\widehat w_{Ek,j}\,dx
+\int_{x_b}^{x_e}P_j\widehat w_{Ek,j}\,dx
 \right]dy,
 $$
 
@@ -409,9 +435,8 @@ r_j=-\int_{y_{Sj}}^{y_{Nj}}
 cP_j(\omega,x_e^{(j)},y)\,dy.
 $$
 
-The first term in `F_j` vanishes under the named thin-WBC approximation. This
-is the precise point at which older formulas using `x_b approximately x_w`
-are recovered; the two coordinates remain semantically distinct.
+This is the thin-WBC form used by the project. A finite-width WBC correction is
+outside the initial theory and would require a later specification.
 
 Each regional budget is
 
@@ -419,20 +444,20 @@ $$
 T_{out}^{(j)}-T_{in}^{(j)}=-F_j+r_jh_e^{(j)}.
 $$
 
-Units are part of the operator contract:
+Units are part of the calculation contract:
 
 - `F`: `m3 s-1`;
 - `r` and `kappa`: `m2 s-1`;
 - `h_e`: `m`;
 - `r*h_e` and `kappa*h_e`: `m3 s-1`.
 
-Partial north-of-latitude integrals are computed by the same operator and
+Partial north-of-latitude integrals are computed by the same calculation and
 cached for transport diagnostics. They are not independently reimplemented in
 plotting code.
 
-## 8. Global equation systems
+## 8. Model equation systems
 
-### 8.1 Full F/r form: normative derivation
+### 8.1 Global system
 
 The seven unknowns are
 
@@ -458,95 +483,37 @@ F_3-T_{P,Ek}
 \end{pmatrix}.
 $$
 
-The implementation must reproduce this matrix up to a declared permutation.
-It is a normative reference, not by itself an independent oracle if both forms
-reuse the same operator code. Independent acceptance evaluates the solved
-state against the separately assembled seven unreduced regional-budget and
-branch-decomposition residuals.
+The implementation solves this explicit three-by-three system at each
+frequency, reports rank and condition number, and reconstructs the four
+connection transports afterward. It must reproduce the displayed matrix up to
+a declared permutation. Independent acceptance evaluates the solved state
+against the separately assembled seven unreduced regional-budget and
+branch-decomposition residuals. A generic equation compiler and a second
+auxiliary formulation are unnecessary for the initial fixed model.
 
-### 8.2 Q/K form: recommended production system
+### 8.2 Atlantic system
 
-Define
-
-$$
-K_j(y,\omega)=c(y)\left[1-e^{-i\omega L_j(y)/c(y)}\right],
-$$
+For the Atlantic region, the total-transport budget is
 
 $$
-p_j(y,\omega)=\int_{x_w^{(j)}}^{x_e^{(j)}}
-\widehat w_{Ek,j}\,dx,
+T_N-T_S=-F+r h_e.
 $$
 
-$$
-q_j(y,\omega)=\int_{x_b^{(j)}}^{x_e^{(j)}}
-\widehat w_{Ek,j}e^{-i\omega(x-x_b^{(j)})/c}\,dx.
-$$
-
-Thus `p` is the full-section pumping integral consistent with local Ekman
-transport, while `q` is the phase-weighted Rossby-interior integral. When
-`x_b != x_w`, the WBC-strip contribution retained in `F` is also retained in
-the unreduced regional budgets.
-
-When local Ekman transports and pumping derive from the same stress anomaly,
-the explicit `p` terms cancel in the non-Ekman transport system. In unknown
-order `(h_P, h_I, h_A)`, the production matrix is
+The southern closure `h_w(y_S)=0` gives
 
 $$
-\begin{pmatrix}
-\kappa_P-\int_3K_Pdy&-\kappa_P&0\\
-0&\kappa_I-\int_2K_Idy&-\kappa_I\\
--\kappa_P-\int_5K_Ady&
-\kappa_P-\kappa_I-\int_4K_Ady&
-\kappa_I-\int_1K_Ady
-\end{pmatrix}
-\begin{pmatrix}h_P\\h_I\\h_A\end{pmatrix}
-=
-\begin{pmatrix}
-Q_P\\Q_I\\\widetilde T_N+Q_A
-\end{pmatrix},
+T_S=T_{Ek,S}+\frac{g'H}{f_S}h_e.
 $$
 
-where
+Therefore the scalar system is
 
 $$
-Q_P=\int_3q_Pdy,
-\quad
-Q_I=\int_2q_Idy,
-\quad
-Q_A=\int_{1\cup4\cup5}q_Ady.
+\left(r+\frac{g'H}{f_S}\right)h_e
+=F+T_N-T_{Ek,S}.
 $$
 
-The first implementation should solve this explicit three-by-three system per
-frequency, report rank and condition number, and reconstruct all auxiliary
-graph transports afterward. A generic equation compiler is unnecessary for
-the initial fixed global model.
-
-### 8.3 Atlantic-only system
-
-Applying `h_w(y_S)=0`, and hence
-`T_tilde_S = g_prime*H*h_e/f_S`, gives the following scalar system.
-
-For total northern transport,
-
-$$
-\left[
-\frac{g'H}{f_S}-\int_{y_S}^{y_N}K\,dy
-\right]\widehat h_e
-=\widehat T_N-\widehat T_{Ek,S}
--\int_{y_S}^{y_N}(\widehat p-\widehat q)\,dy.
-$$
-
-Using non-Ekman northern transport gives the equivalent form
-
-$$
-\left[
-\frac{g'H}{f_S}-\int K\,dy
-\right]\widehat h_e
-=\widehat{\widetilde T}_N+\int\widehat q\,dy.
-$$
-
-The Atlantic facade uses this scalar operator, rather than routing through the
-global three-thickness matrix.
+`AtlanticModel` solves this scalar equation directly rather than routing
+through the global three-thickness matrix.
 
 ## 9. Diagnostics and solution contract
 
@@ -563,7 +530,9 @@ At the interior edge of the WBC region,
 
 $$
 \widehat h_b
-=\widehat h_e e^{-i\omega L/c}-\frac{\widehat q}{c}.
+=\widehat h_e e^{-i\omega L/c}
+-\frac{1}{c}\int_{x_b}^{x_e}\widehat w_{Ek}(x')
+e^{-i\omega(x'-x_b)/c}\,dx'.
 $$
 
 For the global Atlantic path, the applicable eastern thickness is
@@ -577,17 +546,18 @@ h_P,&y<y_P.
 \end{cases}
 $$
 
-The path's non-Ekman transport is
+For any region `j`, define `F_{j,\ge y}` and `r_{j,\ge y}` by using `y` as the
+southern limit in the Section 7 definitions. The total transport at latitude
+`y` follows directly from the partial regional budget:
 
 $$
-\widetilde T_A(y)
-=\widetilde T_N
-+\int_y^{y_N}\left[q_A+K_Ah_e^*\right]dy'
-+\mathbf 1_{y<y_I}T_{I,g}
-+\mathbf 1_{y<y_P}T_{P,g},
+T_j(y)=T_{j,N}+F_{j,\ge y}-r_{j,\ge y}h_e^{(j)}.
 $$
 
-where
+For the global Atlantic view, this equation is evaluated piecewise in regions
+1, 4, and 5. The solved graph transport at each gateway supplies the northern
+value for the next sector, so no interpolation or ad hoc jump is introduced.
+The branch geostrophic transports remain
 
 $$
 T_{I,g}=\kappa_I(h_I-h_A),
@@ -595,39 +565,28 @@ T_{I,g}=\kappa_I(h_I-h_A),
 T_{P,g}=\kappa_P(h_P-h_I).
 $$
 
-The Indian and Pacific physical views are, respectively, regions 2 and 3.
-For either closed-north region `j`, the common regional diagnostic is
-
-$$
-\widehat{\widetilde T}_j(y)
-=\widehat{\widetilde T}_{j,N}
-+\int_y^{y_{Nj}}\left(q_j+K_jh_e^{(j)}\right)dy',
-$$
-
-with `h_e^(2)=h_I` and `h_e^(3)=h_P`. The northern stress taper makes the
-closed-boundary Ekman transport zero, so both total and non-Ekman northern
-transport are zero to tolerance. `h_b`, `h_w`, and total transport then follow
-from the same equations used for the Atlantic. These views do not extend
-through the composite southern regions unless a later specification defines a
-new physical decomposition there.
+For regions 2 and 3, `T_{j,N}=0` at the closed northern boundary, with
+`h_e^(2)=h_I` and `h_e^(3)=h_P`. Their regional transports, `h_b`, and `h_w`
+follow from the same equations. They are not extended through the composite
+southern sectors as generic named oceans.
 
 `AdjustmentSolution` returns labelled `xarray` objects containing at least:
 
 - `h_e(time, independent_boundary)`;
 - `edge_transport(time, connection, component)`, where `component` is exactly
-  `total`, `non_ekman`, or `ekman`;
+  `total`, `geostrophic`, or `ekman`;
 - `h_b(time, region, latitude)`;
-- `h_w(time, ocean_view, latitude)`;
-- `transport_non_ekman(time, ocean_view, latitude)`;
-- `transport_ekman(time, ocean_view, latitude)`;
-- `transport_total(time, ocean_view, latitude)`;
+- `h_w(time, view, latitude)`;
+- `transport_geostrophic(time, view, latitude)`;
+- `transport_ekman(time, view, latitude)`;
+- `transport_total(time, view, latitude)`;
 - frequency, rank, condition number, and residual diagnostics;
 - named forcing contributions when a decomposition solve is requested.
 
-The full `F/r` regional budgets conserve the `total` edge component. The
-production `Q/K` budgets conserve `non_ekman`; `ekman` is added from the unique
-gateway wind view, and `total = non_ekman + ekman` is then enforced. No
-unlabelled graph transport is exposed.
+The `F/r` regional budgets conserve the `total` edge component. Geostrophic and
+Ekman components are named diagnostics, with `total = geostrophic + ekman`
+enforced wherever all three are reported. No unlabelled graph transport is
+exposed.
 
 Full interior thickness is an on-demand diagnostic rather than an eagerly
 stored solution variable. `AdjustmentSolution.interior_thickness(...)`
@@ -646,183 +605,76 @@ Saved scientific output is the full unfiltered anomaly solution. A zero-phase
 Butterworth low-pass filter may be applied by plotting/example code for a
 declared cutoff, but it creates a derived presentation variable and never
 replaces solved state. Transport comparison plots use one common symmetric
-colour normalization for non-Ekman, Ekman, and total components when those
+colour normalization for geostrophic, Ekman, and total components when those
 panels are intended for direct comparison.
 
-## 10. Proposed components
+## 10. Minimal public surface
 
-The scientific responsibilities below are normative. Python class names and
-constructor shapes are provisional and may be refined during implementation
-without changing those responsibilities.
-
-| Component | Responsibility |
+| Object | Responsibility |
 |---|---|
-| `PhysicalParameters` | `g_prime`, `H`, `rho0`, Earth/rotation constants, Rossby cap, Ekman regularization |
-| `TimeAxis` | Common uniform analysis interval and units |
-| `FourierPlan` | Anomalies, reflection, padding, frequencies, crop, DC/Nyquist policy |
-| `BoundaryTrace` | One validated unwrapped longitude function and provenance |
-| `RegionGeometry` | Latitude domain plus references to `x_w`, `x_b`, and `x_e` |
-| `MultiBasinGeometry` | Six source bathymetric traces, any derived `x_b` traces, five region views, interfaces, polygons, physical-ocean views |
-| `GeometrySampler` | Intersect trace coverage with requested domains and map physical boundaries to one forcing grid without exact-coordinate assumptions |
-| `DirectedRegionTopology` | Fixed non-ITF graph, edge directions, degrees, child order, boundary-sharing groups |
-| `WindStressAnomaly` | Typed `tau_x_prime` and `tau_y_prime` source field |
-| `RegionForcingSet` | Regional stress overrides, unique gateway ownership, typed external transports |
-| `WindResponseOperator` | Taper, regularized Ekman transport, curl, `w_Ek`, `p`, `q`, `F` |
-| `RegionFrequencyOperator` | `K`, `r`, partial integrals, characteristic `h_b` coefficients |
-| `GlobalNoITFModel` | Assemble and solve the fixed global system, reconstruct graph state |
-| `AtlanticOnlyModel` | Assemble and solve the one-region southern closure |
-| `CompositeOceanView` | Stitch region diagnostics across junctions with branch jumps |
-| `AdjustmentSolution` | Labelled state, residuals, transport/thickness diagnostics, provenance |
+| `Basin` | One sector's `x_b`, `x_e`, northern and southern limits, and named inflows/outflows |
+| `MultiBasinTopology` | The five basins, fixed connections, east-to-west child order, and shared eastern boundaries |
+| `WindStressAnomaly` | Dynamic `tau_x_prime` and `tau_y_prime` on the common time record |
+| `BasinForcingSet` | Per-basin wind prescriptions and typed boundary transports |
+| `GlobalModel` | Compute `w_Ek`, `T_Ek`, `F`, and `r`; assemble and solve the fixed global system |
+| `AtlanticModel` | Apply the same calculations to the scalar Atlantic closure |
+| `AdjustmentSolution` | Labelled thicknesses, transports, residuals, forcing contributions, and provenance |
 
-All configuration objects are immutable after validation. Arrays are either
-owned read-only NumPy values or labelled xarray objects with explicit copy/view
-semantics. Model instances contain configuration and reusable operators, not
-mutable experiment results.
+`AtlanticView` may be a small solution helper for the piecewise diagnostic in
+Section 9; it need not be a general ocean class. Time alignment, geometry
+sampling, Fourier transforms, and partial `F`/`r` integrals are implementation
+functions unless a repeated use case later justifies a public object. There is
+no public `Physics`, `Port`, `EquationCompiler`, gateway-view, or generic
+physical-ocean abstraction.
 
-## 11. Error and validation policy
+## 11. Required validation
 
-Configuration errors fail before any expensive transform. They include:
+Before scientific release, tests must establish that:
 
-- missing or duplicate region keys/connections;
-- a graph other than the exact non-ITF preset passed to the global facade;
-- incomplete or non-unique child order;
-- geometry/topology interface disagreement;
-- missing regional wind forcing without an explicit default;
-- incompatible wind values or missing ownership at a shared gateway;
-- mixing total and non-Ekman transport without a conversion field;
-- inconsistent time axes, units, anomaly intervals, or stress conventions;
-- use of `x_w` as `x_b` without explicit approximation metadata;
-- non-finite inputs or non-positive region width.
+- the five basin keys, graph connections, child order, and shared eastern
+  boundaries match Section 3 exactly;
+- every sampled basin has finite `x_b` and `x_e`, with `x_e > x_b`, and every
+  internal gateway has one physical latitude and one sampled row;
+- wind inputs are dynamic-stress anomalies on one uniform common record;
+- tapering-on and tapering-off paths are both tested, and differentiating the
+  step-shaped masks does not create spurious curl sheets;
+- the area integral of `w_Ek` equals the change in section `T_Ek` for every
+  basin when computed with the same grid and regularization;
+- zero extension prevents an end-to-start FFT arrival, the inverse transform is
+  real, zero forcing gives zero response, and linear superposition holds;
+- the assembled global matrix matches Section 8 and the solution closes all
+  seven unreduced equations independently;
+- the Atlantic scalar solve satisfies both its northern prescription and
+  southern closure;
+- all regional volume budgets close, graph transports are conservative, and
+  `T = T_g + T_Ek` wherever components are reported;
+- `h_b` is the characteristic solution at `x_b`, `h_w` follows from geostrophic
+  transport, and the Atlantic diagnostic uses the correct gateway transports.
 
-Frequency failures report the frequency/period, matrix rank, condition number,
-equation labels, and scaled residual. The solver never silently fills an
-underdetermined bin, drops a Nyquist bin, or changes a forcing component.
+Failures report the affected basin, frequency or period, matrix condition, and
+scaled residual; no missing forcing, singular frequency, or component mismatch
+is filled or relabelled silently.
 
-## 12. Acceptance tests required before scientific release
+## 12. Fixed initial conventions
 
-### Geometry and topology
+The first implementation uses one compact set of defaults for both model
+facades:
 
-- Exactly six source bathymetric `x_w`/`x_e` traces and five non-ITF regions,
-  plus derived dynamical `x_b` traces wherever `thin_wbc` is not used.
-- `y_S < y_P < y_I < y_N`; all region domains are finite.
-- Physical and sampled outer boundaries are recorded separately; trace-domain
-  intersection never creates inconsistent copies of a shared gateway.
-- Exact graph degrees, acyclic order, child order, and boundary-sharing groups.
-- Unwrapped `x_e > x_b` throughout every region.
-- `x_b` remains semantically distinct from `x_w`.
-
-### Wind and forcing
-
-- Both stress-anomaly components are required.
-- Explicit anomaly mean is zero over the common record at every grid point.
-- Tapering precedes curl; closed-boundary and region-seam tests detect leakage.
-- Pumping and local Ekman transport use the same regularization and source
-  stress.
-- Each regional discrete `integral(p dy)` equals the difference of its unique
-  northern and southern Ekman face transports.
-- Shared gateway transports have one recorded owner and one value.
-- Independent zero/replace/scale tests for all five regional forcings.
-- Total-to-non-Ekman conversion closes at every prescribed section.
-
-### Frequency operators and solvers
-
-- FFT/reflection/crop round trip and no circular end-to-start arrival.
-- Zero forcing gives an exactly zero anomaly solution.
-- Analytic sinusoidal-delay phase test.
-- Global assembled matrix matches the `F/r` matrix above up to a declared
-  permutation.
-- Production `Q/K` and normative `F/r` formulations agree when driven by the same
-  wind stress.
-- The solved state closes the independently assembled seven unreduced global
-  budget and branch residuals.
-- All nonzero bins have expected rank; conditioning and residuals are exposed.
-- Inverse transforms are real to tolerance and DC is exactly zero.
-- Linearity and superposition hold for every named forcing contribution.
-
-### Diagnostics
-
-- Every regional volume budget closes in frequency and time domains.
-- Internal connection transports are conservative under graph orientation.
-- `T = T_tilde + T_Ek` and
-  `T_tilde = g_prime*H/f*(h_e-h_w)` away from the regularized equatorial
-  singularity.
-- `h_b` equals the characteristic solution evaluated at `x_b`.
-- Global Atlantic path has the correct branch jumps at `y_I` and `y_P`.
-- Indian and Pacific views reconstruct their closed northern conditions and
-  regional budgets.
-- Atlantic-only northern reconstruction and southern closure match their
-  prescribed transports.
-- On-demand interior thickness agrees with `h_e` at `x_e` and with the stored
-  `h_b` diagnostic at `x_b`.
-
-## 13. Implementation sequence after specification approval
-
-1. Implement value objects and validation only: parameters, time, traces,
-   regions, fixed topology, and typed forcing schemas.
-2. Implement wind-stress anomaly preparation and unit-tested spherical Ekman
-   operators.
-3. Implement `FourierPlan` and isolated region response kernels.
-4. Implement the Atlantic-only scalar solver and analytic benchmark tests.
-5. Implement the explicit non-ITF global matrix, normative `F/r` reference,
-   and independently assembled seven-equation residual check.
-6. Implement labelled diagnostics and physical-ocean views.
-7. Add real-data integration workflows and worked examples only after all
-   synthetic acceptance tests pass.
-
-This is a technical dependency order, not a predetermined branch or PR plan.
-Review units will be agreed when implementation begins. Real-data examples
-must not become the primary proof of equation correctness.
-
-## 14. Decisions requested in review
-
-The architecture can proceed with defaults, but the following scientific
-choices should be explicitly approved before implementation:
-
-1. Whether `x_b approximately x_w` is accepted initially, and how WBC width is
-   later prescribed.
-2. Default `H`, `g_prime`, isobath depth, and whether global and Atlantic-only
-   defaults differ. Existing notebooks use both 500 m and 1000 m choices.
-3. Whether public northern transport defaults to `total` or `non_ekman` for
-   SCOTIA experiments. Both remain supported and explicitly typed.
-4. The default equatorial regularization scale and stress-taper widths.
-5. Exact junction and closed-basin northern latitudes.
-6. Whether the first global implementation should expose only the fixed
-   non-ITF preset, as recommended here, or also an experimental arbitrary-graph
-   API.
-
-## 15. Source basis
-
-This specification reconciles:
-
-- `atlantic_adjustment/notebooks/global_ocean.ipynb`;
-- `atlantic_adjustment/notebooks/frequency_space.ipynb`;
-- `atlantic_adjustment/notes/two_basins/build/main.pdf` and its TeX source;
-- the later global/Atlantic transport and comparison notebooks;
-- Codex task `019f6120-a741-7972-80b3-96d2376b09e3`, which records the
-  operational global and Atlantic-only frequency-space experiments;
-- the existing single-basin source as historical behavior, not as a required
-  API.
-
-Where sources conflict, this document uses the non-ITF graph, wind-stress
-anomalies as the public forcing, `h_b` at the interior edge of the WBC region,
-and `h_w` as the geostrophic western-boundary diagnostic. The later ITF graph
-in the two-basin note and interface mockup is explicitly outside the initial
-scope.
-
-### 15.1 Equation and implementation traceability
-
-| Source | Normative material used here |
+| Quantity | Convention |
 |---|---|
-| `notes/two_basins/build/main.pdf`, pages 1-2, equations 1-12 | Five-region non-ITF budgets, child ordering, branch transports, reduced thickness system |
-| `notebooks/global_ocean.ipynb`, cells 3-9 | Region geometry, graph coefficients, and explicit global matrix |
-| `notebooks/frequency_space.ipynb`, cell 0 | Fourier sign and characteristic phase convention |
-| `notes/rotation_report/main.tex`, lines 168-245 | `x_w`, `x_b`, `h_b`, governing PDE, capped Rossby speed, Ekman regularization, and southern Atlantic closure |
-| `notebooks/global_atlantic_transport.ipynb`, cells 5, 7, 9, 11 | Common-record anomalies, reflected FFT plan, `Q/K` solve, and `h_b`/`h_w` reconstruction |
-| `notebooks/single_basin_atlantic_transport.ipynb`, cells 0 and 6-11 | Atlantic-only southern Ekman boundary condition and scalar frequency-space solve |
+| Active-layer and contour depth | one shared `H = isobath_depth = 1000 m` parameter |
+| Reduced gravity | `g_prime = 0.02 m s-2` |
+| Reference density | `rho0 = 1027 kg m-3` |
+| Junctions and Atlantic limits | `y_S=-56`, `y_P=-44`, `y_I=-35`, `y_N=55` degrees north |
+| Closed Indian/Pacific north | northernmost common finite boundary row at or south of `y_N` |
+| Northern forcing | directly prescribed total transport; SCOTIA for the Atlantic example |
+| Wind-stress taper | off; optional raised-cosine width of 2 degrees when enabled |
+| Equatorial regularization | `gamma = abs(f(phi_c))`, recorded and provisional |
+| Global topology | the fixed non-ITF graph in Section 3 |
 
-The operational task also established two implementation regressions that are
-now explicit requirements: differentiating a discontinuous composite mask can
-create a false wind-curl sheet near South Africa, and exact `.sel()` of a
-physical boundary latitude is unsafe when the isobath and ERA5 grids do not
-coincide. Region-wise differentiation and sampled-boundary adaptation address
-those issues without changing the governing equations.
+`H` and isobath depth are the same quantity, not independently adjustable
+parameters. A run may override a default only by recording the new value in
+its configuration and output. The regularization is the sole convention still
+awaiting scientific justification, tracked in
+[issue #7](https://github.com/andrewwatford/MOCAdjustmentTheory/issues/7); that
+issue does not block the fixed initial implementation.
