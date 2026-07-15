@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+  "h5py>=3.11",
   "h5netcdf>=1.3",
   "numpy>=1.26",
   "xarray>=2024.10",
