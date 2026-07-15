@@ -50,6 +50,8 @@ def test_trace_domain_and_common_northern_limit() -> None:
     assert west.northern_latitude == 2.0
     assert west.covers(-1.0, 2.0)
     assert not west.covers(-2.0, 2.0)
+    assert west.common_northern_limit(east) == 1.0
+    assert west.common_northern_limit(east, cap=0.0) == 0.0
     assert west.common_northern_limit(east, cap=3.0) == 1.0
 
 

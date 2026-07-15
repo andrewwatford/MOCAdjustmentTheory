@@ -184,17 +184,19 @@ class BoundaryTrace:
         )
 
     def common_northern_limit(
-        self, other: BoundaryTrace, *, cap: float
+        self, other: BoundaryTrace, *, cap: float | None = None
     ) -> float:
-        """Return the northernmost common valid sample at or south of ``cap``."""
+        """Return the northernmost common valid sample, optionally below a cap."""
 
         common = np.intersect1d(
             self.latitude[self.valid], other.latitude[other.valid]
         )
-        common = common[common <= cap]
+        if cap is not None:
+            common = common[common <= cap]
         if common.size == 0:
+            qualifier = "" if cap is None else f" at or south of {cap}"
             raise ValueError(
-                f"{self.key!r} and {other.key!r} have no common latitude at "
-                f"or south of {cap}"
+                f"{self.key!r} and {other.key!r} have no common latitude"
+                f"{qualifier}"
             )
         return float(common[-1])

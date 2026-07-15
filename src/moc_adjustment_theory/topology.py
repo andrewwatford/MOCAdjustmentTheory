@@ -279,20 +279,20 @@ class MultiBasinTopology:
         ):
             raise ValueError("Indian gateway latitude is inconsistent")
         indian_limit = r2.western_boundary.common_northern_limit(
-            r2.eastern_boundary, cap=r1.northern_boundary
+            r2.eastern_boundary
         )
-        if not np.isclose(r2.northern_boundary, indian_limit):
+        if r2.northern_boundary != indian_limit:
             raise ValueError(
                 "Indian northern closure must be the northernmost common "
-                "boundary sample at or south of y_N"
+                "boundary sample"
             )
         pacific_limit = r3.western_boundary.common_northern_limit(
-            r3.eastern_boundary, cap=r1.northern_boundary
+            r3.eastern_boundary
         )
-        if not np.isclose(r3.northern_boundary, pacific_limit):
+        if r3.northern_boundary != pacific_limit:
             raise ValueError(
                 "Pacific northern closure must be the northernmost common "
-                "boundary sample at or south of y_N"
+                "boundary sample"
             )
 
         expected_traces = {

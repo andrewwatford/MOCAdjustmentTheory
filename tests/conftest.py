@@ -8,7 +8,7 @@ from moc_adjustment_theory import Basin, BoundaryTrace
 
 @pytest.fixture
 def boundary_traces() -> dict[str, BoundaryTrace]:
-    latitude = np.arange(-56.0, 56.0)
+    latitude = np.arange(-56.0, 61.0)
 
     def trace(
         key: str,
@@ -36,13 +36,13 @@ def boundary_traces() -> dict[str, BoundaryTrace]:
         "atlantic_east": trace(
             "atlantic_east", "east", 20.0, -35.0, 55.0
         ),
-        "indian_west": trace("indian_west", "west", 20.0, -35.0, 50.0),
-        "indian_east": trace("indian_east", "east", 120.0, -44.0, 50.0),
+        "indian_west": trace("indian_west", "west", 20.0, -35.0, 58.0),
+        "indian_east": trace("indian_east", "east", 120.0, -44.0, 58.0),
         "pacific_west": trace(
-            "pacific_west", "west", 120.0, -44.0, 52.0
+            "pacific_west", "west", 120.0, -44.0, 60.0
         ),
         "pacific_east": trace(
-            "pacific_east", "east", 290.0, -56.0, 52.0
+            "pacific_east", "east", 290.0, -56.0, 60.0
         ),
     }
 
@@ -65,7 +65,7 @@ def non_itf_basins(boundary_traces: dict[str, BoundaryTrace]) -> tuple[Basin, ..
             western_boundary=t["indian_west"],
             eastern_boundary=t["indian_east"],
             southern_boundary=-35.0,
-            northern_boundary=50.0,
+            northern_boundary=58.0,
             inflows=("T_I",),
         ),
         Basin(
@@ -73,7 +73,7 @@ def non_itf_basins(boundary_traces: dict[str, BoundaryTrace]) -> tuple[Basin, ..
             western_boundary=t["pacific_west"],
             eastern_boundary=t["pacific_east"],
             southern_boundary=-44.0,
-            northern_boundary=52.0,
+            northern_boundary=60.0,
             inflows=("T_P",),
         ),
         Basin(

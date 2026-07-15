@@ -47,6 +47,14 @@ def test_non_itf_topology_has_exact_graph(
     )
     assert topology.children("indian_north") == ()
     assert topology.children("pacific_north") == ()
+    assert (
+        topology.basin("indian_north").northern_boundary
+        > topology.basin("atlantic_north").northern_boundary
+    )
+    assert (
+        topology.basin("pacific_north").northern_boundary
+        > topology.basin("atlantic_north").northern_boundary
+    )
 
 
 def test_topology_preserves_boundary_identity_and_atlantic_path(
@@ -130,8 +138,8 @@ def test_topology_rejects_mismatched_gateway(
 @pytest.mark.parametrize(
     ("basin_index", "premature_limit", "match"),
     [
-        (1, 49.0, "Indian northern closure"),
-        (2, 51.0, "Pacific northern closure"),
+        (1, 57.0, "Indian northern closure"),
+        (2, 59.0, "Pacific northern closure"),
     ],
 )
 def test_topology_rejects_premature_northern_closure(
@@ -146,6 +154,44 @@ def test_topology_rejects_premature_northern_closure(
     )
 
     with pytest.raises(ValueError, match=match):
+        MultiBasinTopology(basins)
+
+
+def test_topology_distinguishes_nearby_sampled_closure_rows(
+    non_itf_basins: tuple[Basin, ...],
+) -> None:
+    premature_limit = 57.9996
+
+    def insert_sample(trace: BoundaryTrace) -> BoundaryTrace:
+        index = int(np.searchsorted(trace.latitude, premature_limit))
+        return BoundaryTrace(
+            key=trace.key,
+            side=trace.side,
+            latitude=np.insert(trace.latitude, index, premature_limit),
+            longitude=np.insert(
+                trace.longitude, index, trace.longitude_at(premature_limit)
+            ),
+            depth=trace.depth,
+            raw_longitude=np.insert(
+                trace.raw_longitude, index, trace.longitude_at(premature_limit)
+            ),
+            valid=np.insert(trace.valid, index, True),
+            repaired=np.insert(trace.repaired, index, False),
+            provenance=trace.provenance,
+        )
+
+    basins = list(non_itf_basins)
+    indian_west = insert_sample(basins[1].western_boundary)
+    indian_east = insert_sample(basins[1].eastern_boundary)
+    basins[1] = replace(
+        basins[1],
+        western_boundary=indian_west,
+        eastern_boundary=indian_east,
+        northern_boundary=premature_limit,
+    )
+    basins[3] = replace(basins[3], eastern_boundary=indian_east)
+
+    with pytest.raises(ValueError, match="Indian northern closure"):
         MultiBasinTopology(basins)
 
 

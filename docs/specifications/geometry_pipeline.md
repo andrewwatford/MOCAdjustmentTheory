@@ -85,8 +85,9 @@ reference these shared traces rather than copying or re-extracting them:
 | `atlantic_pacific_transition` | `y_S` to `y_P` | `atlantic_west` | `pacific_east` |
 
 `y_NI` and `y_NP` use one deterministic convention: each is the northernmost
-sampled latitude at or south of `y_N` where that basin's west and east traces
-are both finite. The selected values are stored in the geometry.
+sampled latitude where that basin's west and east traces are both finite. They
+may lie north of `y_N`, which limits only the Atlantic domain. The selected
+values are stored in the geometry.
 
 The corresponding topology has the east-to-west child order:
 

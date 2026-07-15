@@ -96,9 +96,10 @@ for adjacent regions.
 
 Regions are views assembled from six shared physical traces, not five
 independently extracted contours. The closed-basin convention is deterministic:
-`y_NI` and `y_NP` are the northernmost sampled latitudes at or south of `y_N`
-where both of that basin's boundary traces are finite. The selected latitude is
-stored in the topology and used by both geometry and forcing calculations.
+`y_NI` and `y_NP` are the northernmost sampled latitudes where both of that
+basin's boundary traces are finite. They may lie north of `y_N`, which limits
+only the Atlantic domain. The selected latitude is stored in the topology and
+used by both geometry and forcing calculations.
 
 Each basin records requested southern and northern latitudes. The geometry
 sampler first verifies that both `x_b` and `x_e` cover that interval, then maps
@@ -666,7 +667,7 @@ facades:
 | Reduced gravity | `g_prime = 0.02 m s-2` |
 | Reference density | `rho0 = 1027 kg m-3` |
 | Junctions and Atlantic limits | `y_S=-56`, `y_P=-44`, `y_I=-35`, `y_N=55` degrees north |
-| Closed Indian/Pacific north | northernmost common finite boundary row at or south of `y_N` |
+| Closed Indian/Pacific north | northernmost common finite boundary row; may lie north of `y_N` |
 | Northern forcing | directly prescribed total transport; SCOTIA for the Atlantic example |
 | Wind-stress taper | off; optional raised-cosine width of 2 degrees when enabled |
 | Equatorial regularization | `gamma = abs(f(phi_c))`, recorded and provisional |
