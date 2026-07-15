@@ -20,4 +20,4 @@ def hello_world(name: str = "world") -> str:
 def main() -> None:
     """Print the scaffold greeting for the temporary console command."""
 
-    print(hello_world("MOC adjustment model"))
+    print(hello_world("MOC adjustment theory"))

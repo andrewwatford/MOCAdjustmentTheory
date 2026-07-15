@@ -1,6 +1,6 @@
-# MOC Adjustment Model
+# MOC Adjustment Theory
 
-This is the initial documentation scaffold for `moc-adjustment-model`, a
+This is the initial documentation scaffold for `moc-adjustment-theory`, a
 planned modular package for reduced-gravity adjustment in connected ocean
 basins.
 
@@ -13,7 +13,7 @@ added.
 After installing from source or in editable mode:
 
 ```python
-from moc_adjustment_model import hello_world
+from moc_adjustment_theory import hello_world
 
 hello_world()
 ```
@@ -23,6 +23,6 @@ The temporary result is `"Hello, world!"`.
 The same check is available from a shell:
 
 ```console
-$ python -m moc_adjustment_model
-Hello, MOC adjustment model!
+$ python -m moc_adjustment_theory
+Hello, MOC adjustment theory!
 ```

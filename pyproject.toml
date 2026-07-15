@@ -3,19 +3,19 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "moc-adjustment-model"
+name = "moc-adjustment-theory"
 version = "0.1.0"
 description = "Modular models of meridional-overturning-circulation adjustment"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {file = "LICENSE"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
   {name = "Andrew Watford"},
 ]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -36,16 +36,17 @@ dev = [
 ]
 
 [project.scripts]
-moc-adjustment-model = "moc_adjustment_model.hello:main"
+moc-adjustment-theory = "moc_adjustment_theory.hello:main"
 
 [project.urls]
-Repository = "https://github.com/andrewwatford/MOCAdjustmentModel"
+Repository = "https://github.com/andrewwatford/MOCAdjustmentTheory"
+Documentation = "https://andrewwatford.github.io/MOCAdjustmentTheory/"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-moc_adjustment_model = ["py.typed"]
+moc_adjustment_theory = ["py.typed"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
