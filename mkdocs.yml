@@ -1,0 +1,12 @@
+site_name: MOC Adjustment Theory
+site_description: Modular models of meridional-overturning-circulation adjustment
+site_url: https://andrewwatford.github.io/MOCAdjustmentTheory/
+repo_url: https://github.com/andrewwatford/MOCAdjustmentTheory
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+
+strict: true
