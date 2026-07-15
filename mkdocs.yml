@@ -33,6 +33,7 @@ extra_javascript:
 nav:
   - Home: index.md
   - Core API: reference/core.md
+  - Production geometry: geometry.md
   - Model architecture: specifications/model_architecture.md
   - Geometry pipeline: specifications/geometry_pipeline.md
 

@@ -667,7 +667,7 @@ facades:
 | Reduced gravity | `g_prime = 0.02 m s-2` |
 | Reference density | `rho0 = 1027 kg m-3` |
 | Junctions and Atlantic limits | `y_S=-56`, `y_P=-44`, `y_I=-35`, `y_N=55` degrees north |
-| Closed Indian/Pacific north | northernmost common finite boundary row; may lie north of `y_N` |
+| Closed Indian/Pacific north | Indian prescribed before its east wall leaves Southeast Asia; Pacific from its northernmost common finite boundary row |
 | Northern forcing | directly prescribed total transport; SCOTIA for the Atlantic example |
 | Wind-stress taper | off; optional raised-cosine width of 2 degrees when enabled |
 | Equatorial regularization | `gamma = abs(f(phi_c))`, recorded and provisional |

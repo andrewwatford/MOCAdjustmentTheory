@@ -70,6 +70,15 @@ def topology_to_dataset(topology: MultiBasinTopology) -> xr.Dataset:
     basin_south = [topology.basin(key).southern_boundary for key in basin_keys]
     basin_north = [topology.basin(key).northern_boundary for key in basin_keys]
 
+    common_provenance = {
+        key: value
+        for key, value in traces[BOUNDARY_TRACE_KEYS[0]].provenance.items()
+        if all(
+            traces[name].provenance.get(key) == value
+            for name in BOUNDARY_TRACE_KEYS
+        )
+    }
+
     r1 = topology.basin("atlantic_north")
     r4 = topology.basin("atlantic_indian_transition")
     r5 = topology.basin("atlantic_pacific_transition")
@@ -105,6 +114,10 @@ def topology_to_dataset(topology: MultiBasinTopology) -> xr.Dataset:
             "longitude_convention": (
                 "continuous degrees east; longitude_wrapped is display-only"
             ),
+            **{
+                f"provenance_{key}": value
+                for key, value in common_provenance.items()
+            },
         },
     )
 

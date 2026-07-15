@@ -25,6 +25,7 @@ def test_topology_dataset_contains_geometry_contract(
     assert dataset.attrs["isobath_depth_m"] == 1000.0
     assert dataset.attrs["southern_boundary"] == -56.0
     assert dataset.attrs["atlantic_north"] == 55.0
+    assert dataset.attrs["provenance_fixture"] == "synthetic"
     assert dataset.basin_west_trace.sel(
         basin="atlantic_indian_transition"
     ).item() == "atlantic_west"

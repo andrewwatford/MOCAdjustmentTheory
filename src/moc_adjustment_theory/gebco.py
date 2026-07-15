@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
+from importlib.metadata import PackageNotFoundError, version
+import json
+import os
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 import xarray as xr
@@ -51,7 +55,28 @@ _CLOSURES = (
         0.3,
         frozenset({"atlantic"}),
     ),
+    (
+        "aleutian_arc",
+        (
+            (162.0, 56.0),
+            (170.0, 53.0),
+            (180.0, 51.5),
+            (190.0, 52.0),
+            (200.0, 54.0),
+            (210.0, 58.0),
+        ),
+        0.4,
+        frozenset({"pacific"}),
+    ),
 )
+
+
+def _software_version() -> str:
+    try:
+        return version("moc-adjustment-theory")
+    except PackageNotFoundError:
+        return "uninstalled"
+
 
 def _normalise_elevation(elevation: xr.DataArray) -> xr.DataArray:
     rename = {}
@@ -373,6 +398,158 @@ def _repair_refinement(
         repaired[start : end + 1] = True
 
 
+def _rolling_median(values: np.ndarray, window: int) -> np.ndarray:
+    median = np.full(values.size, np.nan)
+    half = window // 2
+    for index in range(values.size):
+        local = values[max(0, index - half) : index + half + 1]
+        local = local[np.isfinite(local)]
+        if local.size >= 3:
+            median[index] = np.median(local)
+    return median
+
+
+def _regularization_parameters(key: str) -> dict[str, float]:
+    parameters = {
+        "rolling_window_degrees": 205.0 / 60.0,
+        "outlier_threshold_degrees": 6.0,
+        "maximum_step_degrees": 7.0,
+        "maximum_gap_degrees": 4.0,
+        "smoothing_sigma_degrees": 0.35,
+    }
+    ocean, side = key.split("_")
+    if ocean == "atlantic":
+        parameters.update(
+            outlier_threshold_degrees=5.0,
+            maximum_step_degrees=5.0,
+            smoothing_sigma_degrees=0.45,
+        )
+        if side == "west":
+            parameters["maximum_gap_degrees"] = 6.0
+    elif ocean == "indian":
+        parameters.update(
+            outlier_threshold_degrees=5.0,
+            maximum_step_degrees=5.0,
+            smoothing_sigma_degrees=0.45,
+        )
+    elif ocean == "pacific" and side == "west":
+        parameters.update(
+            outlier_threshold_degrees=5.0,
+            maximum_step_degrees=5.0,
+            maximum_gap_degrees=5.0,
+            smoothing_sigma_degrees=0.55,
+        )
+    return parameters
+
+
+def _regularize_boundary(
+    latitude: np.ndarray,
+    values: np.ndarray,
+    key: str,
+    anchor_latitude: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, Mapping[str, float]]:
+    """Remove branch switches and lightly smooth one single-valued trace."""
+
+    parameters = _regularization_parameters(key)
+    cleaned = values.copy()
+    repaired = np.zeros(values.size, dtype=bool)
+    spacing = float(np.median(np.diff(latitude)))
+    window = max(
+        int(round(parameters["rolling_window_degrees"] / spacing)), 3
+    )
+    if window % 2 == 0:
+        window += 1
+
+    for _ in range(3):
+        rolling = _rolling_median(cleaned, window)
+        outlier = (
+            np.isfinite(cleaned)
+            & np.isfinite(rolling)
+            & (
+                np.abs(cleaned - rolling)
+                > parameters["outlier_threshold_degrees"]
+            )
+        )
+        cleaned[outlier] = np.nan
+        repaired |= outlier
+
+        finite = np.flatnonzero(np.isfinite(cleaned))
+        if finite.size < 2:
+            continue
+        jumps = (
+            np.abs(np.diff(cleaned[finite]))
+            > parameters["maximum_step_degrees"]
+        )
+        for jump in np.flatnonzero(jumps):
+            left = int(finite[jump])
+            right = int(finite[jump + 1])
+            left_score = (
+                abs(cleaned[left] - rolling[left])
+                if np.isfinite(rolling[left])
+                else np.inf
+            )
+            right_score = (
+                abs(cleaned[right] - rolling[right])
+                if np.isfinite(rolling[right])
+                else np.inf
+            )
+            remove = left if left_score > right_score else right
+            cleaned[remove] = np.nan
+            repaired[remove] = True
+
+    finite = np.flatnonzero(np.isfinite(cleaned))
+    if finite.size < 2:
+        raise ValueError(f"regularization removed the full {key} trace")
+    first, last = int(finite[0]), int(finite[-1])
+    for start, end in _runs(~np.isfinite(cleaned[first : last + 1])):
+        start += first
+        end += first
+        gap_span = latitude[end + 1] - latitude[start - 1]
+        if gap_span <= parameters["maximum_gap_degrees"]:
+            cleaned[start : end + 1] = np.interp(
+                latitude[start : end + 1],
+                [latitude[start - 1], latitude[end + 1]],
+                [cleaned[start - 1], cleaned[end + 1]],
+            )
+            repaired[start : end + 1] = True
+
+    segments = _runs(np.isfinite(cleaned))
+    selected = min(
+        segments,
+        key=lambda bounds: max(
+            latitude[bounds[0]] - anchor_latitude,
+            anchor_latitude - latitude[bounds[1]],
+            0.0,
+        ),
+    )
+    keep = np.zeros(values.size, dtype=bool)
+    keep[selected[0] : selected[1] + 1] = True
+    cleaned[~keep] = np.nan
+    repaired &= keep
+
+    sigma = parameters["smoothing_sigma_degrees"] / spacing
+    segment = cleaned[selected[0] : selected[1] + 1]
+    if segment.size >= 7:
+        smoothed = ndimage.gaussian_filter1d(segment, sigma=sigma, mode="nearest")
+        smoothed[0] = segment[0]
+        smoothed[-1] = segment[-1]
+        cleaned[selected[0] : selected[1] + 1] = smoothed
+    regularized = (
+        np.isfinite(values)
+        & np.isfinite(cleaned)
+        & ~np.isclose(values, cleaned, rtol=0.0, atol=1e-12)
+    )
+    return cleaned, repaired, regularized, parameters
+
+
+def _latitude_ranges(latitude: np.ndarray, mask: np.ndarray) -> str:
+    ranges = [
+        [float(latitude[start]), float(latitude[end])]
+        for start, end in _runs(mask)
+    ]
+    return json.dumps(ranges)
+
+
 def extract_boundary_traces(
     elevation: xr.DataArray,
     *,
@@ -381,10 +558,12 @@ def extract_boundary_traces(
     pacific_gateway: float = -44.0,
     indian_gateway: float = -35.0,
     atlantic_north: float = 55.0,
+    indian_north: float = 20.0,
     search_north: float = 70.0,
     search_factor: int = 4,
     deep_fraction_threshold: float = 1.0,
     maximum_gap_rows: int = 2,
+    provenance: Mapping[str, str] | None = None,
 ) -> dict[str, BoundaryTrace]:
     """Extract six shared boundary traces from positive-up bathymetry.
 
@@ -399,6 +578,9 @@ def extract_boundary_traces(
         coordinates. NumPy- and Dask-backed arrays are both supported.
     depth
         Positive isobath and active-layer depth in metres.
+    indian_north
+        Closed Indian northern latitude. The default stops before the Bay of
+        Bengal edge jumps from Southeast Asia onto India.
     search_factor
         Integer coarsening factor used only for candidate search.
 
@@ -495,13 +677,10 @@ def extract_boundary_traces(
         )
 
     atlantic_end = atlantic_north
-    indian_end = float(
-        tracks["indian"][0][
-            np.flatnonzero(
-                np.isfinite(tracks["indian"][1]) & np.isfinite(tracks["indian"][2])
-            )[-1]
-        ]
-    )
+    # North of 20 N the Bay of Bengal branch disappears and the row-wise
+    # eastern edge jumps onto India. Close the model basin while its eastern
+    # wall is still Southeast Asia instead of treating India as that wall.
+    indian_end = float(indian_north)
     pacific_end = float(
         tracks["pacific"][0][
             np.flatnonzero(
@@ -519,6 +698,7 @@ def extract_boundary_traces(
                         pacific_gateway,
                         indian_gateway,
                         atlantic_north,
+                        indian_north,
                     ]
                 ),
             ]
@@ -529,13 +709,41 @@ def extract_boundary_traces(
         & (master <= max(atlantic_end, indian_end, pacific_end))
     ]
 
-    provenance = {
-        "algorithm": "connected_component_native_refinement_v1",
+    closure_definitions = {
+        name: {
+            "points": points,
+            "width_degrees": width,
+            "oceans": sorted(oceans),
+        }
+        for name, points, width, oceans in _CLOSURES
+    }
+    extraction_configuration = {
+        "depth_m": depth,
+        "southern_boundary": southern_boundary,
+        "pacific_gateway": pacific_gateway,
+        "indian_gateway": indian_gateway,
+        "atlantic_north": atlantic_north,
+        "indian_north": indian_north,
+        "search_north": search_north,
+        "search_factor": search_factor,
+        "deep_fraction_threshold": deep_fraction_threshold,
+        "maximum_gap_rows": maximum_gap_rows,
+    }
+    common_provenance = {
+        **({} if provenance is None else dict(provenance)),
+        "algorithm": "connected_component_native_refinement_v2",
         "depth_m": f"{float(depth):g}",
         "search_factor": str(search_factor),
         "deep_fraction_threshold": f"{deep_fraction_threshold:g}",
         "closure_snap_window_degrees": "2",
-        "closures": ",".join(f"{name}:{count}" for name, count in sorted(closure_counts.items())),
+        "closure_affected_cells": json.dumps(closure_counts, sort_keys=True),
+        "closure_definitions": json.dumps(closure_definitions, sort_keys=True),
+        "extraction_configuration": json.dumps(
+            extraction_configuration, sort_keys=True
+        ),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "software_version": _software_version(),
+        "git_commit": os.environ.get("GITHUB_SHA", "unknown"),
         "source": str(elevation.attrs.get("source", elevation.name or "elevation")),
     }
     definitions = {
@@ -564,6 +772,10 @@ def extract_boundary_traces(
             raise ValueError(
                 f"coarse component does not cover the full {key} interval"
             )
+        source_first = int(np.flatnonzero(finite)[0])
+        source_last = int(np.flatnonzero(finite)[-1])
+        if np.any(~finite[source_first : source_last + 1]):
+            raise ValueError(f"coarse component has an internal {key} gap")
         guesses = np.full(master.size, np.nan)
         guesses[valid] = np.interp(
             master[valid], finite_latitude, source_value[finite]
@@ -574,22 +786,23 @@ def extract_boundary_traces(
             source_closure.astype(float),
         ) > 0.0
         repaired = np.zeros(master.size, dtype=bool)
-        final = np.full(master.size, np.nan)
-        final[valid] = _refine_guesses(
+        native = np.full(master.size, np.nan)
+        native[valid] = _refine_guesses(
             elevation, master[valid], guesses[valid], float(depth)
         )
         closure_valid = valid & closure_edge
-        if np.any(closure_valid & ~np.isfinite(final)):
-            retry = closure_valid & ~np.isfinite(final)
-            final[retry] = _refine_guesses(
+        if np.any(closure_valid & ~np.isfinite(native)):
+            retry = closure_valid & ~np.isfinite(native)
+            native[retry] = _refine_guesses(
                 elevation,
                 master[retry],
                 guesses[retry],
                 float(depth),
                 window=2.0,
             )
+        raw = native.copy()
         local_repaired = repaired[valid].copy()
-        local_final = final[valid].copy()
+        local_final = native[valid].copy()
         _repair_refinement(
             local_final,
             local_repaired,
@@ -597,14 +810,93 @@ def extract_boundary_traces(
             latitude=master[valid],
             label=key,
         )
-        final[valid] = local_final
+        native[valid] = local_final
         repaired[valid] = local_repaired
-        raw = final.copy()
-        raw[repaired] = np.nan
+        ocean_index = {"atlantic": 0, "indian": 1, "pacific": 2}[ocean]
+        final, branch_repaired, regularized, regularization = _regularize_boundary(
+            master, native, key, _OCEANS[ocean_index].anchor_latitude
+        )
+        valid &= np.isfinite(final)
+        repaired |= branch_repaired | (closure_valid & valid)
+        repaired &= valid
+
+        final_indices = np.flatnonzero(valid)
+        final_steps = np.abs(np.diff(final[final_indices]))
+        maximum_final_step = float(np.max(final_steps, initial=0.0))
+        final_step_km = (
+            final_steps
+            * 111.2
+            * np.maximum(
+                np.cos(np.deg2rad(master[final_indices[1:]])), 0.2
+            )
+        )
+        maximum_final_step_km = float(np.max(final_step_km, initial=0.0))
+        if maximum_final_step_km > 120.0:
+            step_index = int(np.argmax(final_step_km))
+            step_latitude = float(master[final_indices[step_index + 1]])
+            raise ValueError(
+                f"regularized {key} has a {maximum_final_step_km:g}-km branch jump"
+                f" at {step_latitude:g} degrees north"
+            )
+        comparable = valid & np.isfinite(raw)
+        displacement_km = (
+            np.abs(final[comparable] - raw[comparable])
+            * 111.2
+            * np.maximum(np.cos(np.deg2rad(master[comparable])), 0.2)
+        )
+        closure_comparable = closure_valid & np.isfinite(raw)
+        closure_displacement_km = (
+            np.abs(raw[closure_comparable] - guesses[closure_comparable])
+            * 111.2
+            * np.maximum(
+                np.cos(np.deg2rad(master[closure_comparable])), 0.2
+            )
+        )
+        native_audit = np.full(master.size, np.nan)
+        native_audit[comparable] = raw[comparable]
+        audit = valid & (~np.isfinite(raw) | (np.abs(final - raw) > 0.3))
+        if np.any(audit):
+            native_audit[audit] = _refine_guesses(
+                elevation,
+                master[audit],
+                final[audit],
+                float(depth),
+                window=3.0,
+            )
+        native_comparable = valid & np.isfinite(native_audit)
+        native_missing = valid & ~np.isfinite(native_audit)
+        native_displacement_km = (
+            np.abs(final[native_comparable] - native_audit[native_comparable])
+            * 111.2
+            * np.maximum(
+                np.cos(np.deg2rad(master[native_comparable])), 0.2
+            )
+        )
         trace_provenance = {
-            **provenance,
+            **common_provenance,
             "coarse_search_repaired_rows": str(np.count_nonzero(source_repaired)),
             "closure_snap_rows": str(np.count_nonzero(closure_valid)),
+            "closure_derived_latitude_ranges": _latitude_ranges(
+                master, closure_valid & valid
+            ),
+            "closure_snap_displacement_km_max": f"{np.max(closure_displacement_km, initial=0.0):g}",
+            "branch_repaired_latitude_ranges": _latitude_ranges(
+                master, branch_repaired & valid
+            ),
+            "regularization_parameters": json.dumps(
+                regularization, sort_keys=True
+            ),
+            "regularized_rows": str(np.count_nonzero(regularized & valid)),
+            "regularization_displacement_km_p90": f"{np.percentile(displacement_km, 90) if displacement_km.size else 0.0:g}",
+            "regularization_displacement_km_max": f"{np.max(displacement_km, initial=0.0):g}",
+            "native_isobath_displacement_km_p90": f"{np.percentile(native_displacement_km, 90):g}",
+            "native_isobath_displacement_km_max": f"{np.max(native_displacement_km, initial=0.0):g}",
+            "native_isobath_missing_rows": str(np.count_nonzero(native_missing)),
+            "native_isobath_missing_latitude_ranges": _latitude_ranges(
+                master, native_missing
+            ),
+            "maximum_final_step_degrees": f"{maximum_final_step:g}",
+            "maximum_final_step_km": f"{maximum_final_step_km:g}",
         }
         traces[key] = BoundaryTrace(
             key=key,
@@ -645,7 +937,8 @@ def topology_from_gebco(
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(path)
-    if verify_checksum and _file_sha256(path) != GEBCO_2026_SHA256:
+    actual_checksum = _file_sha256(path) if verify_checksum else "not_verified"
+    if verify_checksum and actual_checksum != GEBCO_2026_SHA256:
         raise ValueError("GEBCO source checksum does not match the manifest")
     with xr.open_dataset(
         path,
@@ -664,7 +957,18 @@ def topology_from_gebco(
             raise ValueError("GEBCO source DOI is not the expected 2026 product")
         if dataset.elevation.attrs.get("units") != "m":
             raise ValueError("GEBCO elevation units must be metres")
-        traces = extract_boundary_traces(dataset.elevation, **extraction_kwargs)
+        traces = extract_boundary_traces(
+            dataset.elevation,
+            provenance={
+                "source_product": "GEBCO 2026 sub-ice global grid",
+                "source_doi": GEBCO_2026_DOI,
+                "source_sha256": actual_checksum,
+                "source_checksum_verified": str(verify_checksum).lower(),
+                "source_path": str(path.resolve()),
+                "source_dimensions": "lat=43200,lon=86400",
+            },
+            **extraction_kwargs,
+        )
     return MultiBasinTopology.from_traces(
         traces,
         southern_boundary=float(extraction_kwargs.get("southern_boundary", -56.0)),
