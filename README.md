@@ -1,18 +1,14 @@
 # MOC Adjustment Theory
 
-`moc-adjustment-theory` will provide modular reduced-gravity models of
-meridional-overturning-circulation adjustment in connected ocean basins.
-
-The repository is currently in its documentation-first setup phase. The only
-public function is a temporary `hello_world` smoke test; scientific model code
-will be added only after its abstractions and geometry pipeline have been
-reviewed.
+`moc-adjustment-theory` is a developing package for reduced-gravity adjustment
+in connected ocean basins. It currently provides the boundary, basin, and
+fixed non-Indonesian-Throughflow topology objects on which the numerical
+models will be built.
 
 ## Install from source
 
 ```bash
 python -m pip install .
-python -m moc_adjustment_theory
 ```
 
 ## Install for development
@@ -23,13 +19,11 @@ python -m pytest
 python -m mkdocs build --strict
 ```
 
-## Temporary API
+## Current API
 
 ```python
-from moc_adjustment_theory import hello_world
-
-assert hello_world() == "Hello, world!"
+from moc_adjustment_theory import Basin, BoundaryTrace, MultiBasinTopology
 ```
 
-See the [deployed documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)
-for the corresponding command-line smoke test.
+See the [documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)
+for the geometry conventions, fixed topology, and generated API reference.

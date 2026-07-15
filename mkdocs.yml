@@ -6,6 +6,15 @@ repo_url: https://github.com/andrewwatford/MOCAdjustmentTheory
 theme:
   name: material
 
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+
 markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
@@ -23,6 +32,7 @@ extra_javascript:
 
 nav:
   - Home: index.md
+  - Core API: reference/core.md
   - Model architecture: specifications/model_architecture.md
   - Geometry pipeline: specifications/geometry_pipeline.md
 

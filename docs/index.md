@@ -1,28 +1,30 @@
 # MOC Adjustment Theory
 
-This is the initial documentation scaffold for `moc-adjustment-theory`, a
-planned modular package for reduced-gravity adjustment in connected ocean
-basins.
+`moc-adjustment-theory` provides modular reduced-gravity adjustment models for
+connected ocean basins. Development is proceeding in reviewed scientific
+slices.
 
-The scientific interfaces are intentionally **not implemented yet**. They
-will be designed in documentation-first pull requests before numerical code is
-added.
+The current implementation contains the shared boundary traces, separately
+initialized basins, and fixed five-basin non-Indonesian-Throughflow topology.
+Wind forcing, frequency-space dynamics, and model solutions will follow in
+subsequent reviewed changes.
 
-## Installation smoke test
+## Install for development
 
-After installing from source or in editable mode:
-
-```python
-from moc_adjustment_theory import hello_world
-
-hello_world()
-```
-
-The temporary result is `"Hello, world!"`.
-
-The same check is available from a shell:
+From the repository root:
 
 ```console
-$ python -m moc_adjustment_theory
-Hello, MOC adjustment theory!
+python -m pip install -e '.[dev]'
+python -m pytest
+python -m mkdocs serve
 ```
+
+## Core objects
+
+Each basin owns its north/south limits and references shared west/east isobath
+traces. Named inflows and outflows are stitched together by
+`MultiBasinTopology` without a separate port or equation-compiler abstraction.
+
+The [Core API](reference/core.md) is generated directly from the scientific
+docstrings. The design specifications remain available while implementation
+and validation are in progress.
