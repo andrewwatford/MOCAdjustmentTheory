@@ -9,6 +9,7 @@ from typing import Iterable
 
 import numpy as np
 import xarray as xr
+from scipy import ndimage
 
 from .geometry import BoundaryTrace
 from .topology import MultiBasinTopology
@@ -31,18 +32,6 @@ class _Ocean:
     east_south: float
 
 
-@dataclass(frozen=True, slots=True)
-class _Candidate:
-    west: float
-    east: float
-    west_physical: bool
-    east_physical: bool
-
-    @property
-    def width(self) -> float:
-        return self.east - self.west
-
-
 _OCEANS = (
     _Ocean("atlantic", 0.0, (-100.0, 40.0), -30.0, 0.0, -56.0, -35.0),
     _Ocean("indian", 75.0, (15.0, 155.0), 75.0, -5.0, -35.0, -44.0),
@@ -63,12 +52,6 @@ _CLOSURES = (
         frozenset({"atlantic"}),
     ),
 )
-
-_EXCLUDED_ISLANDS = {
-    "indian": ((42.0, 52.5, -27.0, -10.0),),
-    "pacific": ((165.0, 180.0, -49.5, -33.0),),
-}
-
 
 def _normalise_elevation(elevation: xr.DataArray) -> xr.DataArray:
     rename = {}
@@ -122,26 +105,6 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), ends.tolist()))
 
 
-def _merge_excluded_islands(
-    runs: list[tuple[int, int]], longitude: np.ndarray, latitude: float, ocean: str
-) -> list[tuple[int, int]]:
-    boxes = _EXCLUDED_ISLANDS.get(ocean, ())
-    merged = list(runs)
-    for west, east, south, north in boxes:
-        if not south <= latitude <= north:
-            continue
-        index = 0
-        while index + 1 < len(merged):
-            left, right = merged[index], merged[index + 1]
-            gap_west = longitude[left[1] + 1]
-            gap_east = longitude[right[0] - 1]
-            if west <= gap_west and gap_east <= east:
-                merged[index : index + 2] = [(left[0], right[1])]
-            else:
-                index += 1
-    return merged
-
-
 def _densify(
     points: Iterable[tuple[float, float]], spacing: float
 ) -> list[tuple[float, float]]:
@@ -160,8 +123,9 @@ def _densify(
 
 def _apply_closures(
     deep: np.ndarray, latitude: np.ndarray, longitude: np.ndarray, ocean: _Ocean
-) -> dict[str, int]:
+) -> tuple[dict[str, int], np.ndarray]:
     affected: dict[str, int] = {}
+    protected = np.zeros_like(deep, dtype=bool)
     dlat = float(np.median(np.diff(latitude)))
     dlon = float(np.median(np.diff(longitude)))
     for name, points, width, oceans in _CLOSURES:
@@ -181,173 +145,63 @@ def _apply_closures(
                 max(0, y_index - y_radius) : y_index + y_radius + 1,
                 max(0, x_index - x_radius) : x_index + x_radius + 1,
             ] = False
-        affected[name] = int(np.count_nonzero(before & ~deep))
-    return affected
+        newly_closed = before & ~deep
+        protected |= newly_closed
+        affected[name] = int(np.count_nonzero(newly_closed))
+    return affected, protected
 
 
-def _candidate_rows(
+def _component_boundary(
     deep: np.ndarray,
     latitude: np.ndarray,
     longitude: np.ndarray,
     ocean: _Ocean,
-    *,
-    minimum_width: float,
-) -> list[list[_Candidate]]:
-    rows: list[list[_Candidate]] = []
-    for row, y in zip(deep, latitude):
-        candidates = []
-        for start, end in _merge_excluded_islands(
-            _runs(row), longitude, float(y), ocean.key
-        ):
-            west_physical = start > 0 and not row[start - 1]
-            east_physical = end + 1 < row.size and not row[end + 1]
-            west = (
-                0.5 * (longitude[start - 1] + longitude[start])
-                if west_physical
-                else longitude[start]
-            )
-            east = (
-                0.5 * (longitude[end] + longitude[end + 1])
-                if east_physical
-                else longitude[end]
-            )
-            if east - west < minimum_width:
-                continue
-            if y >= ocean.west_south and not west_physical:
-                continue
-            if y >= ocean.east_south and not east_physical:
-                continue
-            candidates.append(
-                _Candidate(float(west), float(east), west_physical, east_physical)
-            )
-        rows.append(candidates)
-    return rows
+    side: str,
+    southern_limit: float,
+    protected: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return one outer edge of the seeded 2-D ocean component.
 
+    The component is labelled independently for each boundary after clipping
+    away latitudes south of that boundary's gateway.  This prevents a route
+    through the Southern Ocean from joining nominally separate basins.  All
+    row runs carrying the selected component label are treated as one basin,
+    so islands and internal ridges do not become basin boundaries.
+    """
 
-def _transition_cost(
-    previous: _Candidate, current: _Candidate, latitude: float
-) -> float:
-    scale = 111.2 * max(np.cos(np.deg2rad(latitude)), 0.2)
-    changes = []
-    if previous.west_physical and current.west_physical:
-        changes.append(abs(current.west - previous.west) * scale)
-    if previous.east_physical and current.east_physical:
-        changes.append(abs(current.east - previous.east) * scale)
-    if not changes:
-        changes.append(
-            abs(
-                0.5 * (current.west + current.east)
-                - 0.5 * (previous.west + previous.east)
-            )
-            * scale
-        )
-    width_change = abs(current.width - previous.width) * scale
-    return float(sum(changes) + 0.2 * width_change)
+    start = int(np.argmin(np.abs(latitude - southern_limit)))
+    active = deep[start:]
+    labels, count = ndimage.label(active, structure=np.ones((3, 3), dtype=np.int8))
+    if count == 0:
+        raise ValueError(f"no deep component found for {ocean.key}_{side}")
 
+    anchor = int(np.argmin(np.abs(latitude[start:] - ocean.anchor_latitude)))
+    deep_at_anchor = np.flatnonzero(active[anchor])
+    if not deep_at_anchor.size:
+        raise ValueError(f"no deep anchor row found for {ocean.key}_{side}")
+    seed = int(
+        deep_at_anchor[
+            np.argmin(np.abs(longitude[deep_at_anchor] - ocean.seed_longitude))
+        ]
+    )
+    selected_label = int(labels[anchor, seed])
+    if selected_label == 0:
+        raise ValueError(f"the {ocean.key}_{side} seed is not in deep water")
 
-def _extend_path(
-    rows: list[list[_Candidate]],
-    latitude: np.ndarray,
-    anchor_row: int,
-    anchor_candidate: int,
-    direction: int,
-    *,
-    maximum_gap_rows: int,
-    maximum_step_km: float,
-) -> dict[int, int]:
-    selected = {anchor_row: anchor_candidate}
-    costs = {anchor_row: np.array([0.0 if i == anchor_candidate else np.inf for i in range(len(rows[anchor_row]))])}
-    back: dict[tuple[int, int], tuple[int, int]] = {}
-    last_reachable = anchor_row
-    indices = range(anchor_row + direction, len(rows) if direction > 0 else -1, direction)
-
-    for row_index in indices:
-        if abs(row_index - last_reachable) > maximum_gap_rows + 1:
-            break
-        if not rows[row_index]:
+    component = labels == selected_label
+    values = np.full(latitude.size, np.nan)
+    closure_edge = np.zeros(latitude.size, dtype=bool)
+    for offset, row in enumerate(component):
+        indices = np.flatnonzero(row)
+        if not indices.size:
             continue
-        previous_index = last_reachable
-        previous_cost = costs[previous_index]
-        current_cost = np.full(len(rows[row_index]), np.inf)
-        for current_index, current in enumerate(rows[row_index]):
-            options = []
-            for previous_candidate, previous in enumerate(rows[previous_index]):
-                jump = _transition_cost(previous, current, float(latitude[row_index]))
-                if jump <= maximum_step_km:
-                    options.append((previous_cost[previous_candidate] + jump, previous_candidate))
-            if options:
-                value, previous_candidate = min(options)
-                current_cost[current_index] = value
-                back[(row_index, current_index)] = (
-                    previous_index,
-                    previous_candidate,
-                )
-        if np.any(np.isfinite(current_cost)):
-            costs[row_index] = current_cost
-            last_reachable = row_index
-
-    state = int(np.argmin(costs[last_reachable]))
-    row_index = last_reachable
-    while row_index != anchor_row:
-        selected[row_index] = state
-        row_index, state = back[(row_index, state)]
-    return selected
-
-
-def _track_candidates(
-    rows: list[list[_Candidate]],
-    latitude: np.ndarray,
-    ocean: _Ocean,
-    *,
-    maximum_gap_rows: int,
-    maximum_step_km: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    available = np.array([bool(row) for row in rows])
-    if not np.any(available):
-        raise ValueError(f"no boundary candidates found for the {ocean.key}")
-    possible = np.flatnonzero(available)
-    anchor_row = int(possible[np.argmin(np.abs(latitude[possible] - ocean.anchor_latitude))])
-
-    def anchor_score(candidate: _Candidate) -> tuple[float, float]:
-        distance = max(
-            candidate.west - ocean.seed_longitude,
-            ocean.seed_longitude - candidate.east,
-            0.0,
-        )
-        return distance, -candidate.width
-
-    anchor_candidate = min(
-        range(len(rows[anchor_row])), key=lambda index: anchor_score(rows[anchor_row][index])
-    )
-    selected = _extend_path(
-        rows,
-        latitude,
-        anchor_row,
-        anchor_candidate,
-        1,
-        maximum_gap_rows=maximum_gap_rows,
-        maximum_step_km=maximum_step_km,
-    )
-    selected.update(
-        _extend_path(
-            rows,
-            latitude,
-            anchor_row,
-            anchor_candidate,
-            -1,
-            maximum_gap_rows=maximum_gap_rows,
-            maximum_step_km=maximum_step_km,
-        )
-    )
-    west = np.full(latitude.size, np.nan)
-    east = np.full(latitude.size, np.nan)
-    for row_index, candidate_index in selected.items():
-        candidate = rows[row_index][candidate_index]
-        if candidate.west_physical:
-            west[row_index] = candidate.west
-        if candidate.east_physical:
-            east[row_index] = candidate.east
-    return west, east, *_fill_short_gaps(west, east, maximum_gap_rows)
+        index = int(indices[0] if side == "west" else indices[-1])
+        neighbour = index - 1 if side == "west" else index + 1
+        if neighbour < 0 or neighbour >= longitude.size or deep[start + offset, neighbour]:
+            continue
+        values[start + offset] = 0.5 * (longitude[index] + longitude[neighbour])
+        closure_edge[start + offset] = protected[start + offset, neighbour]
+    return values, closure_edge
 
 
 def _fill_short_gaps(
@@ -404,6 +258,35 @@ def _refine_guesses(
     dlon = float(np.median(np.diff(native_longitude)))
     window = max(window, 1.5 * dlon)
 
+    def tile_for(
+        y_min: float, y_max: float, x_min: float, x_max: float
+    ) -> xr.DataArray:
+        latitude_slice = slice(y_min - 1.1 * dlat, y_max + 1.1 * dlat)
+        if x_min < -180.0:
+            left = elevation.sel(
+                latitude=latitude_slice,
+                longitude=slice(x_min + 360.0, 180.0),
+            ).assign_coords(longitude=lambda value: value.longitude - 360.0)
+            right = elevation.sel(
+                latitude=latitude_slice,
+                longitude=slice(-180.0, x_max),
+            )
+            return xr.concat((left, right), dim="longitude").compute()
+        if x_max > 180.0:
+            left = elevation.sel(
+                latitude=latitude_slice,
+                longitude=slice(x_min, 180.0),
+            )
+            right = elevation.sel(
+                latitude=latitude_slice,
+                longitude=slice(-180.0, x_max - 360.0),
+            ).assign_coords(longitude=lambda value: value.longitude + 360.0)
+            return xr.concat((left, right), dim="longitude").compute()
+        return elevation.sel(
+            latitude=latitude_slice,
+            longitude=slice(x_min, x_max),
+        ).compute()
+
     for start in range(0, guesses.size, band_size):
         end = min(start + band_size, guesses.size)
         y = latitude[start:end]
@@ -412,37 +295,55 @@ def _refine_guesses(
         if not np.any(finite):
             continue
         wrapped = (guess[finite] + 180.0) % 360.0 - 180.0
-        if np.ptp(wrapped) > 90.0:
-            raise ValueError("a refinement band crosses the longitude seam")
-        tile = elevation.sel(
-            latitude=slice(float(y[finite].min() - 1.1 * dlat), float(y[finite].max() + 1.1 * dlat)),
-            longitude=slice(float(wrapped.min() - window), float(wrapped.max() + window)),
-        ).compute()
-        tile_y = np.asarray(tile.latitude.values, dtype=float)
-        tile_x = np.asarray(tile.longitude.values, dtype=float)
-        tile_z = np.asarray(tile.values, dtype=float)
-
         finite_indices = np.flatnonzero(finite)
-        for wrapped_index, local_index in enumerate(finite_indices):
-            target_y = y[local_index]
-            target_guess = wrapped[wrapped_index]
-            upper = int(np.searchsorted(tile_y, target_y))
-            upper = min(max(upper, 1), tile_y.size - 1)
-            lower = upper - 1
-            fraction = (target_y - tile_y[lower]) / (tile_y[upper] - tile_y[lower])
-            row = (1.0 - fraction) * tile_z[lower] + fraction * tile_z[upper]
-            local = np.abs(tile_x - target_guess) <= window
-            crossings = _linear_crossings(tile_x[local], row[local], depth)
-            if crossings.size:
-                crossing = float(crossings[np.argmin(np.abs(crossings - target_guess))])
-                original_guess = guess[local_index]
-                crossing += 360.0 * round((original_guess - crossing) / 360.0)
-                refined[start + local_index] = crossing
+        breaks = np.r_[0, np.flatnonzero(np.abs(np.diff(wrapped)) > 180.0) + 1, wrapped.size]
+        for group_start, group_end in zip(breaks[:-1], breaks[1:]):
+            group_indices = finite_indices[group_start:group_end]
+            group_wrapped = wrapped[group_start:group_end]
+            if np.ptp(group_wrapped) > 90.0:
+                raise ValueError("a refinement band is not longitude-continuous")
+            group_y = y[group_indices]
+            tile = tile_for(
+                float(group_y.min()),
+                float(group_y.max()),
+                float(group_wrapped.min() - window),
+                float(group_wrapped.max() + window),
+            )
+            tile_y = np.asarray(tile.latitude.values, dtype=float)
+            tile_x = np.asarray(tile.longitude.values, dtype=float)
+            tile_z = np.asarray(tile.values, dtype=float)
+
+            for target_index, local_index in enumerate(group_indices):
+                target_y = y[local_index]
+                target_guess = group_wrapped[target_index]
+                upper = int(np.searchsorted(tile_y, target_y))
+                upper = min(max(upper, 1), tile_y.size - 1)
+                lower = upper - 1
+                fraction = (target_y - tile_y[lower]) / (
+                    tile_y[upper] - tile_y[lower]
+                )
+                row = (1.0 - fraction) * tile_z[lower] + fraction * tile_z[upper]
+                local = np.abs(tile_x - target_guess) <= window
+                crossings = _linear_crossings(tile_x[local], row[local], depth)
+                if crossings.size:
+                    crossing = float(
+                        crossings[np.argmin(np.abs(crossings - target_guess))]
+                    )
+                    original_guess = guess[local_index]
+                    crossing += 360.0 * round(
+                        (original_guess - crossing) / 360.0
+                    )
+                    refined[start + local_index] = crossing
     return refined
 
 
 def _repair_refinement(
-    values: np.ndarray, repaired: np.ndarray, maximum_gap_rows: int
+    values: np.ndarray,
+    repaired: np.ndarray,
+    maximum_gap_rows: int,
+    *,
+    latitude: np.ndarray | None = None,
+    label: str = "boundary",
 ) -> None:
     missing = ~np.isfinite(values)
     if not np.any(missing):
@@ -456,7 +357,14 @@ def _repair_refinement(
             or not np.isfinite(values[start - 1])
             or not np.isfinite(values[end + 1])
         ):
-            raise ValueError("native refinement left an unrepaired boundary gap")
+            location = (
+                f" from {latitude[start]:g} to {latitude[end]:g} degrees north"
+                if latitude is not None
+                else ""
+            )
+            raise ValueError(
+                f"native refinement left an unrepaired {label} gap{location}"
+            )
         values[start : end + 1] = np.interp(
             np.arange(start, end + 1),
             [start - 1, end + 1],
@@ -475,15 +383,14 @@ def extract_boundary_traces(
     atlantic_north: float = 55.0,
     search_north: float = 70.0,
     search_factor: int = 4,
-    minimum_width: float = 2.0,
+    deep_fraction_threshold: float = 1.0,
     maximum_gap_rows: int = 2,
-    maximum_step_km: float = 500.0,
 ) -> dict[str, BoundaryTrace]:
     """Extract six shared boundary traces from positive-up bathymetry.
 
-    Coarsened deep-water fractions locate candidate branches. Paired western
-    and eastern candidates are tracked continuously, then every selected
-    crossing is recomputed from the native elevation grid.
+    Coarsened deep-water fractions identify seeded two-dimensional ocean
+    components independently above each gateway.  Their rowwise outer edges
+    are then recomputed from the native elevation grid.
 
     Parameters
     ----------
@@ -503,10 +410,15 @@ def extract_boundary_traces(
 
     if search_factor < 1:
         raise ValueError("search_factor must be a positive integer")
+    if not 0.0 < deep_fraction_threshold <= 1.0:
+        raise ValueError("deep_fraction_threshold must lie in (0, 1]")
     elevation = _normalise_elevation(elevation)
     native_dlat = float(np.median(np.diff(elevation.latitude.values)))
     work = elevation.sel(
-        latitude=slice(southern_boundary - 2 * native_dlat, search_north + 2 * native_dlat)
+        latitude=slice(
+            southern_boundary - 2 * native_dlat,
+            search_north + 2 * native_dlat,
+        )
     )
     tracks = {}
     closure_counts: dict[str, int] = {}
@@ -523,40 +435,64 @@ def extract_boundary_traces(
             ocean.longitude_bounds,
             ocean.seed_longitude,
             ocean.anchor_latitude,
-            southern_boundary if ocean.key == "atlantic" else (indian_gateway if ocean.key == "indian" else pacific_gateway),
+            (
+                southern_boundary
+                if ocean.key == "atlantic"
+                else indian_gateway if ocean.key == "indian" else pacific_gateway
+            ),
             east_south,
         )
         window = _window(work, ocean)
-        deep = (window <= -float(depth)).astype(np.float32)
+        deep_fraction = (window <= -float(depth)).astype(np.float32)
         if search_factor > 1:
-            deep = deep.coarsen(
+            deep_fraction = deep_fraction.coarsen(
                 latitude=search_factor,
                 longitude=search_factor,
                 boundary="trim",
             ).mean()
-        deep = deep.compute()
+        deep = (deep_fraction >= deep_fraction_threshold).compute()
         latitude = np.asarray(deep.latitude.values, dtype=float)
         longitude = np.asarray(deep.longitude.values, dtype=float)
-        deep_values = np.asarray(deep.values >= 0.5, dtype=bool)
-        counts = _apply_closures(deep_values, latitude, longitude, ocean)
-        closure_counts.update(
-            {name: closure_counts.get(name, 0) + count for name, count in counts.items()}
+        deep_values = np.asarray(deep.values, dtype=bool)
+        counts, protected = _apply_closures(
+            deep_values, latitude, longitude, ocean
         )
-        rows = _candidate_rows(
+        closure_counts.update(
+            {
+                name: closure_counts.get(name, 0) + count
+                for name, count in counts.items()
+            }
+        )
+        west, west_closure = _component_boundary(
             deep_values,
             latitude,
             longitude,
             ocean,
-            minimum_width=minimum_width,
+            "west",
+            ocean.west_south,
+            protected,
         )
-        west, east, repaired_west, repaired_east = _track_candidates(
-            rows,
+        east, east_closure = _component_boundary(
+            deep_values,
             latitude,
+            longitude,
             ocean,
-            maximum_gap_rows=maximum_gap_rows,
-            maximum_step_km=maximum_step_km,
+            "east",
+            ocean.east_south,
+            protected,
         )
-        tracks[ocean.key] = (latitude, west, east, repaired_west, repaired_east)
+        repaired_west, repaired_east = _fill_short_gaps(
+            west, east, maximum_gap_rows
+        )
+        tracks[ocean.key] = (
+            latitude,
+            west,
+            east,
+            repaired_west,
+            repaired_east,
+            west_closure & np.isfinite(west),
+            east_closure & np.isfinite(east),
+        )
 
     atlantic_end = atlantic_north
     indian_end = float(
@@ -577,16 +513,28 @@ def extract_boundary_traces(
         np.concatenate(
             [
                 *(track[0] for track in tracks.values()),
-                np.array([southern_boundary, pacific_gateway, indian_gateway, atlantic_north]),
+                np.array(
+                    [
+                        southern_boundary,
+                        pacific_gateway,
+                        indian_gateway,
+                        atlantic_north,
+                    ]
+                ),
             ]
         )
     )
-    master = master[(master >= southern_boundary) & (master <= max(atlantic_end, indian_end, pacific_end))]
+    master = master[
+        (master >= southern_boundary)
+        & (master <= max(atlantic_end, indian_end, pacific_end))
+    ]
 
     provenance = {
-        "algorithm": "paired_continuity_native_refinement_v1",
+        "algorithm": "connected_component_native_refinement_v1",
         "depth_m": f"{float(depth):g}",
         "search_factor": str(search_factor),
+        "deep_fraction_threshold": f"{deep_fraction_threshold:g}",
+        "closure_snap_window_degrees": "2",
         "closures": ",".join(f"{name}:{count}" for name, count in sorted(closure_counts.items())),
         "source": str(elevation.attrs.get("source", elevation.name or "elevation")),
     }
@@ -603,23 +551,61 @@ def extract_boundary_traces(
         source_latitude = tracks[ocean][0]
         source_value = tracks[ocean][value_index]
         source_repaired = tracks[ocean][value_index + 2]
+        source_closure = tracks[ocean][value_index + 4]
         valid = (master >= south) & (master <= north)
         finite = np.isfinite(source_value)
+        finite_latitude = source_latitude[finite]
+        source_spacing = float(np.median(np.diff(source_latitude)))
+        if (
+            not finite_latitude.size
+            or finite_latitude[0] > south + 1.01 * source_spacing
+            or finite_latitude[-1] < north - 1.01 * source_spacing
+        ):
+            raise ValueError(
+                f"coarse component does not cover the full {key} interval"
+            )
         guesses = np.full(master.size, np.nan)
-        guesses[valid] = np.interp(master[valid], source_latitude[finite], source_value[finite])
+        guesses[valid] = np.interp(
+            master[valid], finite_latitude, source_value[finite]
+        )
+        closure_edge = np.interp(
+            master,
+            source_latitude,
+            source_closure.astype(float),
+        ) > 0.0
         repaired = np.zeros(master.size, dtype=bool)
-        repaired[np.isin(master, source_latitude[source_repaired])] = True
         final = np.full(master.size, np.nan)
         final[valid] = _refine_guesses(
             elevation, master[valid], guesses[valid], float(depth)
         )
+        closure_valid = valid & closure_edge
+        if np.any(closure_valid & ~np.isfinite(final)):
+            retry = closure_valid & ~np.isfinite(final)
+            final[retry] = _refine_guesses(
+                elevation,
+                master[retry],
+                guesses[retry],
+                float(depth),
+                window=2.0,
+            )
         local_repaired = repaired[valid].copy()
         local_final = final[valid].copy()
-        _repair_refinement(local_final, local_repaired, maximum_gap_rows)
+        _repair_refinement(
+            local_final,
+            local_repaired,
+            maximum_gap_rows,
+            latitude=master[valid],
+            label=key,
+        )
         final[valid] = local_final
         repaired[valid] = local_repaired
         raw = final.copy()
         raw[repaired] = np.nan
+        trace_provenance = {
+            **provenance,
+            "coarse_search_repaired_rows": str(np.count_nonzero(source_repaired)),
+            "closure_snap_rows": str(np.count_nonzero(closure_valid)),
+        }
         traces[key] = BoundaryTrace(
             key=key,
             side=side,
@@ -629,7 +615,7 @@ def extract_boundary_traces(
             raw_longitude=raw,
             valid=valid,
             repaired=repaired,
-            provenance=provenance,
+            provenance=trace_provenance,
         )
     return traces
 

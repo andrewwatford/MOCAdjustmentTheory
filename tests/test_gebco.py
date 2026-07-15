@@ -1,16 +1,23 @@
 from __future__ import annotations
 
+import os
+
 import numpy as np
+import pytest
 import xarray as xr
 
-from moc_adjustment_theory import MultiBasinTopology, extract_boundary_traces
+from moc_adjustment_theory import (
+    MultiBasinTopology,
+    extract_boundary_traces,
+    topology_from_gebco,
+)
 
 
-def synthetic_global_elevation() -> xr.DataArray:
+def synthetic_global_elevation(step: float = 1.0) -> xr.DataArray:
     """Simple global ocean separated by three continental barriers."""
 
-    latitude = np.arange(-60.0, 66.0)
-    longitude = np.arange(-180.0, 180.0)
+    latitude = np.arange(-60.0, 65.0 + 0.5 * step, step)
+    longitude = np.arange(-180.0, 180.0, step)
     elevation = np.full((latitude.size, longitude.size), -2000.0)
 
     def add_land(
@@ -24,8 +31,8 @@ def synthetic_global_elevation() -> xr.DataArray:
     add_land(-20.0, 30.0, -35.0, 65.0)  # Africa and Europe
     add_land(100.0, 155.0, -44.0, 65.0)  # Australia and Asia
     add_land(30.0, 100.0, 26.0, 65.0)  # closed northern Indian Ocean
-    add_land(155.0, 179.0, 60.0, 65.0)  # closed northern Pacific
-    add_land(-180.0, -100.0, 60.0, 65.0)
+    add_land(155.0, 180.0, 60.0, 65.0)  # closed northern Pacific
+    add_land(-180.0, -60.0, 60.0, 65.0)
     add_land(45.0, 50.0, -25.0, -10.0)  # Madagascar-like island
     add_land(170.0, 175.0, -49.0, -35.0)  # New-Zealand-like island
 
@@ -67,6 +74,7 @@ def test_extract_boundary_traces_builds_exact_shared_geometry() -> None:
     assert traces["pacific_east"].longitude_at(0.0) == 279.5
     assert traces["atlantic_west"].longitude_at(0.0) == -59.5
     assert traces["indian_west"].longitude_at(-15.0) == 30.5
+    assert traces["indian_east"].longitude_at(-15.0) == 99.5
     assert traces["pacific_west"].longitude_at(-40.0) == 155.5
     assert np.nanmax(np.abs(np.diff(traces["pacific_east"].longitude))) < 1.0
     assert not np.any(
@@ -89,6 +97,15 @@ def test_extract_boundary_traces_is_deterministic() -> None:
         np.testing.assert_array_equal(first[key].repaired, second[key].repaired)
 
 
+def test_extract_boundary_traces_uses_default_coarsening() -> None:
+    traces = extract_boundary_traces(synthetic_global_elevation(step=0.1))
+    topology = MultiBasinTopology.from_traces(traces)
+
+    assert topology.basin("atlantic_north").northern_boundary == 55.0
+    assert topology.basin("indian_north").northern_boundary >= 24.0
+    assert topology.basin("pacific_north").northern_boundary >= 58.0
+
+
 def test_extract_boundary_traces_inserts_exact_requested_latitudes() -> None:
     traces = extract_boundary_traces(
         synthetic_global_elevation(),
@@ -108,8 +125,8 @@ def test_extract_boundary_traces_inserts_exact_requested_latitudes() -> None:
 def test_extract_boundary_traces_records_one_row_repair() -> None:
     elevation = synthetic_global_elevation()
     elevation.loc[
-        {"latitude": 10.0, "longitude": slice(-80.0, -60.0)}
-    ] = -2000.0
+        {"latitude": 10.0, "longitude": slice(-60.0, -59.0)}
+    ] = np.nan
     traces = extract_boundary_traces(elevation, search_factor=1)
     index = int(np.flatnonzero(traces["atlantic_west"].latitude == 10.0)[0])
 
@@ -121,8 +138,40 @@ def test_extract_boundary_traces_records_one_row_repair() -> None:
 def test_extract_boundary_traces_rejects_long_gap() -> None:
     elevation = synthetic_global_elevation()
     elevation.loc[
-        {"latitude": slice(10.0, 12.0), "longitude": slice(-80.0, -60.0)}
-    ] = -2000.0
+        {
+            "latitude": slice(10.0, 12.0),
+            "longitude": slice(-60.0, -59.0),
+        }
+    ] = np.nan
 
-    with np.testing.assert_raises_regex(ValueError, "unrepaired boundary gap"):
+    with np.testing.assert_raises_regex(ValueError, "unrepaired .* gap"):
         extract_boundary_traces(elevation, search_factor=1)
+
+
+@pytest.mark.integration
+def test_production_gebco_geometry_acceptance() -> None:
+    source = os.environ.get("MOC_GEBCO_FILE")
+    if source is None:
+        pytest.skip("set MOC_GEBCO_FILE to run the full GEBCO acceptance test")
+
+    topology = topology_from_gebco(source)
+    assert topology.basin("atlantic_north").northern_boundary == 55.0
+    assert 20.0 < topology.basin("indian_north").northern_boundary < 35.0
+    assert 55.0 < topology.basin("pacific_north").northern_boundary < 70.0
+
+    traces = {
+        trace.key: trace
+        for basin in topology
+        for trace in (basin.western_boundary, basin.eastern_boundary)
+    }
+    assert set(traces) == {
+        "atlantic_west",
+        "atlantic_east",
+        "indian_west",
+        "indian_east",
+        "pacific_west",
+        "pacific_east",
+    }
+    for trace in traces.values():
+        assert np.all(np.isfinite(trace.longitude[trace.valid]))
+        assert np.count_nonzero(trace.repaired) / np.count_nonzero(trace.valid) < 0.001
