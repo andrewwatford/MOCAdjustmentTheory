@@ -104,12 +104,20 @@ contour:
 | `atlantic_pacific` | `y_S` to `y_P` | `atlantic_west` | `pacific_east` |
 
 Junction latitudes are reviewed configuration values, not values inferred from
-the first finite sample in a noisy trace. Outer closures additionally carry an
-effective latitude derived from the overlap of their defining traces. For
-example, the usable southern Atlantic-Pacific limit cannot precede the first
-latitude where both `atlantic_west` and `pacific_east` are finite. Requested
-and effective limits are both preserved; a shift beyond a reviewed tolerance
-is an error rather than an unnoticed change of geometry.
+the first finite sample in a noisy trace. The contract distinguishes three
+latitude layers:
+
+1. **requested physical latitude**: the reviewed scientific boundary;
+2. **geometry-effective latitude**: an outer closure clipped to the continuous
+   finite overlap of its defining bathymetric west/east traces;
+3. **sampled latitude**: the first or last row actually used after mapping the
+   geometry to a particular wind/model grid.
+
+For example, the geometry-effective southern Atlantic-Pacific limit cannot
+precede `max(first_valid(atlantic_west), first_valid(pacific_east))`. Requested
+and geometry-effective limits are preserved, and a shift beyond a reviewed
+tolerance is an error. Internal gateways `y_P` and `y_I` remain at their
+requested physical latitudes; they are never inferred from trace coverage.
 
 ## 4. Coordinate conventions
 
@@ -152,11 +160,16 @@ whose physical area varies with latitude.
 
 ### 4.4 Physical and sampled boundaries
 
-`MultiBasinGeometry` stores continuous physical boundary latitudes. A later
-`GeometrySampler` maps them to a particular wind/model grid by intersecting
-the requested region interval with finite west, `x_b`, and east coverage. It
-uses the first/last included row for a discrete outer boundary or closed-basin
-taper; it does not assume an exact coordinate match.
+`MultiBasinGeometry` stores requested and geometry-effective continuous
+latitudes. Geometry-effective coverage is defined from the source bathymetric
+west/east traces. A resolved `x_b` must cover that whole interval; a shorter
+`x_b` is a configuration error rather than a reason to clip it again.
+
+A later `GeometrySampler` maps the effective geometry to a particular
+wind/model grid. It uses the first/last included row for a sampled outer
+boundary or closed-basin taper and records the source-grid identity; it does
+not assume an exact coordinate match. Sampled latitudes belong to that adapter
+result, not to the source `MultiBasinGeometry`.
 
 An internal shared gateway remains one physical interface for its parent and
 children. Sampling either maps all participants to the same row or fails with
@@ -172,13 +185,18 @@ least:
 - target isobath depth;
 - working-grid coarsening rule;
 - ocean longitude frames and search windows;
-- six trace domains and four junction/closure latitudes;
-- deep-basin anchor points, with multiple anchors per ocean where practical;
-- minimum physical component area;
-- named topology overrides and their geometries;
+- six trace domains and all six requested latitudes `y_S`, `y_P`, `y_I`,
+  `y_N`, `y_NI`, and `y_NP`;
+- deep-ocean anchor points and basin-specific partition/search corridors;
+- minimum shallow-barrier and deep-component physical areas;
+- named topology overrides, each with an explicit `force_barrier`,
+  `force_deep`, or `exclude_barrier_component` operation;
+- named ignored-island components or boxes, initially including Madagascar
+  and New Zealand;
 - interval-tracking weights and hard constraints;
 - crossing-refinement window;
 - gap, outlier, displacement, and smoothing tolerances;
+- requested-to-effective boundary-shift tolerance;
 - `x_b` policy or explicit WBC-width prescription;
 - output and QA thresholds.
 
@@ -195,6 +213,12 @@ latitude band required by all traces plus a declared halo for connectivity;
 the prototype uses approximately `-60.5` to `72.5` degrees north. Record the
 actual source slices.
 
+The extraction halo south of `y_S` is available only for local interpolation
+and endpoint QA. Before connected-component analysis, mask everything south of
+the requested physical `y_S`: the theoretical ocean ends at the southern tip
+of South America and treats that section as an external boundary with
+prescribed inflow. No path around Antarctica may connect the model geometry.
+
 Convert positive-up elevation `z` to positive-down ocean depth
 
 $$d=-z.$$
@@ -207,8 +231,11 @@ both satisfy a numerical threshold.
 Block-average the native 15 arc-second grid by a configured integer factor;
 the current prototype uses `4x4`, producing a one-arc-minute working grid.
 Record whether partial coastal blocks are included and how land/ocean mixtures
-are reduced. The same input/configuration must yield bitwise-identical working
-values on supported platforms.
+are reduced. The reduction tree, chunking, numerical dtype, and dependency
+versions are fixed in provenance. Canonical scientific arrays must be exactly
+reproducible in the pinned reference environment; other supported environments
+must meet declared numerical tolerances. NetCDF file bytes are not required to
+match across compression libraries or metadata serializers.
 
 Native-resolution tiles remain available for Stage 8 refinement and QA. The
 working grid is a search accelerator, not the final authority for an isobath
@@ -229,41 +256,57 @@ barrier from one created by configuration.
 The non-ITF ocean topology requires a small number of scientific choices where
 a depth contour alone does not express the intended basin closure. Each choice
 is an explicit named operation with a polyline or component rule, width,
-rationale, affected mask, and citation/provenance.
+rationale, affected mask, and citation/provenance. Every override declares its
+mask semantics: `force_barrier`, `force_deep`, or
+`exclude_barrier_component`. An implementation may not infer the operation
+from the override's name.
 
 The initial configuration is expected to include:
 
-- `greenland_iceland_uk_europe_bridge`, preserving Atlantic continuity across
-  the northern ridge/island system where required;
+- `greenland_iceland_uk_europe_bridge`, forcing a narrow shallow barrier that
+  joins the intended shelf/continental components where required;
 - `southeast_asia_australia_closure`, closing Indonesian Throughflow for the
   non-ITF topology with a narrow shelf-following route;
 - `bering_strait_closure`;
 - `caribbean_bahamas_attachment`, when the Caribbean arc is intended to join
   the American shelf.
 
-Isolated island shelves such as Madagascar and New Zealand do not become basin
-walls merely because they generate closed contours.
+Before interval selection, label shallow/barrier components and remove named
+ignored-island components from the selection mask while retaining them in the
+raw diagnostic. At minimum, Madagascar and New Zealand are explicit initial
+exclusions. This is the production counterpart of the prototype's
+`_large_barrier_mask` and `EXCLUDED_ISLAND_BOXES`; merely stating that islands
+are ignored is not sufficient.
 
 Overrides must be narrow and shelf-following. Large rectangular dams are
 prohibited. The report gives the area and length changed by every operation and
 plots raw and modified masks separately.
 
-### Stage 5: identify physical deep-ocean components
+### Stage 5: identify the global interior and basin partitions
 
-Label deep-water components using cyclic eight-connectivity. Select each
-physical ocean with multiple stable interior anchor points rather than by
-component size or longitude alone. Every anchor must be deep at the target
-isobath; otherwise processing stops with a configuration error.
+Label deep water using cyclic eight-connectivity after truncating at `y_S` and
+applying the non-ITF overrides and ignored-island filtering. Select the
+intended model-domain deep-ocean component using multiple stable anchors;
+every anchor must be deep at the target isobath and belong to that component.
 
-Multiple anchors guard against a marginal sea or an accidental working-grid
-closure becoming the selected component. The selected Atlantic, Indian, and
-Pacific components are saved as QA masks.
+This is not a model of the ocean south of South America. Within the retained
+domain, however, sectors 5 (Atlantic-Pacific) and 4 (Indo-Atlantic) are
+intentionally composite connected regions. The three named physical oceans
+therefore are views/partitions of the truncated model domain, not three
+independent global connected-component labels.
+
+Within the global component, explicit basin partition masks, search corridors,
+and gateway cross-sections define where Atlantic, Indian, and Pacific boundary
+candidates may be sought. Multiple anchors per partition guard against a
+marginal sea or a wrong contour branch. Save the global component and all
+partition/corridor masks for QA.
 
 ### Stage 6: enumerate candidate intervals by latitude
 
-At every working-grid latitude and within each ocean's unwrapped search frame,
-enumerate contiguous intervals belonging to the selected deep component. For
-each interval record:
+At every working-grid latitude and within each basin's unwrapped partition and
+search corridor, enumerate contiguous intervals belonging to the selected
+global deep component. Ignored barrier components cannot split an interval.
+For each candidate record:
 
 - western/eastern cell indices and unwrapped longitudes;
 - width and physical area contribution;
@@ -276,9 +319,9 @@ No longitude-window endpoint is silently accepted as a shelf crossing.
 
 ### Stage 7: choose one continuous interval sequence
 
-Choose one interval per latitude with a continuity-aware global optimization,
-not independent row-wise `min/max` selection. A dynamic-programming or
-equivalent bidirectional tracker minimizes a declared cost built from:
+Choose one interval per latitude with a deterministic continuity-aware
+tracker, not independent row-wise `min/max` selection. A dynamic-programming
+or equivalent method may minimize a declared cost built from:
 
 - geodesic displacement of west and east endpoints;
 - loss of overlap with the previous interval;
@@ -287,16 +330,25 @@ equivalent bidirectional tracker minimizes a declared cost built from:
 - search-window-edge contact;
 - branch switches not supported by topology configuration.
 
-Hard constraints enforce anchor containment and trace domains. The algorithm
-reports the selected path, runner-up cost, and low-confidence rows. Running the
-same rows in reverse order must not change the result.
+Hard constraints enforce partition/corridor membership, anchor containment,
+and trace domains. The algorithm reports the selected path and low-confidence
+rows. Runner-up costs and reverse-order sensitivity are recommended QA, not
+part of the minimal `MultiBasinGeometry` contract.
 
 ### Stage 8: locate and refine true isobath crossings
 
 For each selected interval edge, interpolate the target-depth crossing between
 the adjacent shallow and deep working-grid cell centres. Then reopen a small
 native 15 arc-second GEBCO window around that estimate and refine the crossing
-on the native grid.
+on the native grid. Native refinement has a configured maximum search distance;
+exceeding it is a branch-identity failure, not permission to select a remote
+crossing.
+
+At an exact requested gateway latitude that is not a native pixel-centre row,
+interpolate native bathymetry in latitude first and then solve for the zonal
+target-depth crossing. Do not obtain a gateway by merely interpolating between
+two already extracted trace longitudes, which need not remain on the target
+isobath.
 
 Every result receives a status:
 
@@ -304,24 +356,28 @@ Every result receives a status:
 - `working_grid_crossing` if native refinement is impossible but the coarse
   crossing is valid;
 - `configured_endpoint` for an explicitly reviewed domain boundary;
+- `topology_override`, carrying the override ID and source geometry for a
+  boundary segment created by a reviewed bridge or closure;
 - `short_gap_fill` for a later permitted repair;
 - `failure`.
 
 An unconfigured search-window edge is always `failure`. Raw longitude, final
-longitude, adjacent source depths, interpolated depth residual, and status are
-retained.
+longitude, adjacent source depths, independently evaluated native-grid depth,
+override ID, and status are retained.
 
 ### Stage 9: enforce independent trace domains
 
 Apply the reviewed domains of all six traces independently. Junctions such as
 `y_S`, `y_P`, and `y_I` are represented exactly on the geometry output
-latitude grid. If the grid would skip a junction, insert it rather than move
-the physical gateway to a nearby sample. Region effective outer limits are
-then obtained from the finite overlap of the traces that define that region,
-with requested/effective differences reported.
+latitude grid using the bathymetric interpolation-and-recrossing rule above.
+Region geometry-effective outer limits are then obtained from the finite
+overlap of the bathymetric traces that define that region, with requested and
+effective values named separately.
 
-Values outside a trace's domain are missing by design and distinguishable from
-an extraction failure inside the domain.
+An explicit `in_domain` mask distinguishes designed out-of-domain missing
+values from extraction failure. Every sample inside a final effective region
+must be finite. A permitted short gap is filled and labelled `short_gap_fill`;
+an unfilled in-domain `NaN` rejects the geometry regardless of gap length.
 
 ### Stage 10: conservative regularization
 
@@ -331,36 +387,20 @@ Raw crossings are the starting point for any repair:
 2. fill only internal gaps shorter than the configured maximum;
 3. optionally apply a robust median/Gaussian or spline smoother on the
    continuous longitude branch;
-4. cap pointwise and Hausdorff displacement from raw crossings;
-5. snap every smoothed point back to the nearest valid target-depth crossing
-   in a local native-resolution search.
+4. cap pointwise displacement from raw crossings;
+5. snap every smoothed natural-contour point back to the nearest valid
+   target-depth crossing within the configured native search radius.
 
 Regularization must not make a visually smooth curve cease to be the requested
-isobath. Long gaps, persistent branch ambiguity, or excessive displacement are
-failures requiring configuration review, not invitations to interpolate.
+isobath. A `topology_override` segment remains on its reviewed override
+geometry and is exempt only from isobath snap-back; its length, displacement,
+and affected area are gated separately. Long gaps, persistent branch
+ambiguity, or excessive displacement are failures requiring configuration
+review, not invitations to interpolate.
 
 Both raw and final traces remain in the output.
 
-### Stage 11: assemble region polygons
-
-Construct the five regions from references to the six final traces. Northern
-and southern edges are explicit zonal sections at configured junctions.
-Polygons use continuous longitudes internally and have a declared orientation.
-
-Validate:
-
-- positive local width everywhere;
-- closure and non-self-intersection;
-- intended adjacency at `y_P` and `y_I`;
-- no unintended region overlap except shared boundaries;
-- physical-ocean anchors lie inside their intended polygons;
-- region-to-trace mappings match the table in Section 3.
-
-The Atlantic, Indian, and Pacific physical-ocean views reference these regions
-and interfaces rather than creating independent polygons with divergent
-boundaries.
-
-### Stage 12: construct `x_b` explicitly
+### Stage 11: construct shared `x_b` traces explicitly
 
 Bathymetry produces `x_w`, the western isobath/shelf trace. Model dynamics use
 `x_b`, the offshore edge of the unresolved WBC region. `MultiBasinGeometry`
@@ -373,8 +413,37 @@ therefore requires one of:
 
 Option 3 is acceptable only when metadata states the approximation. APIs,
 variables, and documentation retain both names; they never redefine `x_w` as
-`x_b`. Geometry validation applies positive-width and smoothness checks to the
-chosen `x_b` separately from isobath adherence checks on `x_w`.
+`x_b`.
+
+There is one shared `x_b` per physical western boundary, not one independent
+copy per region:
+
+- Atlantic `x_b` is reused by regions 1, 4, and 5 and the Atlantic-only view;
+- Indian `x_b` is used by region 2;
+- Pacific `x_b` is used by region 3.
+
+In each continuous longitude frame, validation requires
+
+$$x_w\le x_b < x_e,$$
+
+with equality `x_b=x_w` allowed only for named `thin_wbc`. A non-thin
+prescription also has reviewed minimum and maximum WBC-width bounds and must
+cover the full geometry-effective latitude domain. Smoothness checks on `x_b`
+are separate from isobath-adherence checks on `x_w`.
+
+### Stage 12: assemble region views and optional polygons
+
+Construct the five normative region views from references to the six final
+bathymetric traces and the shared `x_b` traces. Validate positive local width,
+the exact mappings in Section 3, and intended interface adjacency at `y_P` and
+`y_I`.
+
+Polygon generation is recommended for spatial QA but is not required by the
+numerical `MultiBasinGeometry` interface. If produced, northern and southern
+edges are explicit sections at configured boundaries; polygons use continuous
+longitudes and must be closed, correctly oriented, non-self-intersecting, and
+free of unintended overlap. The Atlantic, Indian, and Pacific views reference
+the same regions and interfaces rather than creating divergent boundaries.
 
 ### Stage 13: create the Atlantic-only view
 
@@ -392,17 +461,18 @@ A validated, immutable trace contains:
 - key and physical-ocean role;
 - latitude and continuous-longitude arrays;
 - raw and final values;
-- target isobath and crossing status;
+- target isobath, crossing status, and topology-override ID where applicable;
 - source-depth residuals and confidence flags;
-- valid domain and configured endpoints;
+- `in_domain` and `valid` masks plus configured endpoints;
 - coordinate frame and display wrapping rule;
 - source/configuration/provenance hashes.
 
 ### `RegionGeometry`
 
-A region contains references to west, WBC-edge, and east traces; exact
-north/south latitudes; derived metric widths/areas; polygon geometry; and the
-IDs of adjacent interfaces. It owns no forcing or physics parameters.
+A region contains references to west, shared WBC-edge, and east traces;
+requested and geometry-effective north/south latitudes; derived metric
+widths/areas; optional polygon geometry; and the IDs of adjacent interfaces.
+It owns no forcing or physics parameters.
 
 ### `MultiBasinGeometry`
 
@@ -411,7 +481,7 @@ The global object contains:
 - the six unique source bathymetric traces;
 - derived dynamical `x_b` traces when `thin_wbc` is not used;
 - the five region views;
-- exact junction and closure latitudes;
+- requested and geometry-effective junction/closure latitudes;
 - shared-boundary and region-to-trace mappings;
 - directed-interface geometry needed by the fixed topology;
 - Atlantic/Indian/Pacific composite views;
@@ -420,6 +490,13 @@ The global object contains:
 It rejects duplicate copies of a supposedly shared trace. Shared geometry is
 represented by object identity or an immutable trace key, making accidental
 divergence structurally difficult.
+
+### `GeometrySampler`
+
+The sampler returns a grid-specific view containing sampled boundary
+latitudes, the source grid identity, and mappings back to requested and
+geometry-effective latitudes. It does not mutate or serialize those sampled
+values as if they were properties of the source geometry.
 
 ## 8. Output contract
 
@@ -430,6 +507,7 @@ The primary CF-oriented NetCDF contains at least:
 ```text
 coordinates:
     trace
+    wbc_trace
     region
     latitude
 
@@ -438,27 +516,34 @@ variables:
     longitude(trace, latitude)
     longitude_wrapped(trace, latitude)       # display only
     crossing_status(trace, latitude)
+    topology_override_id(trace, latitude)
     crossing_confidence(trace, latitude)
     depth_residual(trace, latitude)
     raw_to_final_displacement(trace, latitude)
+    in_domain(trace, latitude)
     valid(trace, latitude)
     region_west_trace(region)
     region_east_trace(region)
-    region_southern_latitude(region)
-    region_northern_latitude(region)
+    region_requested_southern_latitude(region)
+    region_requested_northern_latitude(region)
     region_effective_southern_latitude(region)
     region_effective_northern_latitude(region)
-    x_b_longitude(region, latitude)           # when a policy is resolved
+    region_x_b_trace(region)
+    x_b_longitude(wbc_trace, latitude)         # when a policy is resolved
 ```
+
+A separate sampled-geometry record contains
+`region_sampled_southern_latitude`, `region_sampled_northern_latitude`, the
+wind/model latitude-grid identity, and the mapping to effective boundaries.
 
 String/status encodings and missing-value conventions are documented. Global
 attributes include GEBCO DOI/checksum, target depth, algorithm and schema
 versions, Git commit, dependency versions, normalized configuration and hash,
 creation time, longitude frames, and `x_b` policy.
 
-### 8.2 Spatial review products
+### 8.2 Recommended spatial review products
 
-Emit GeoJSON or GeoPackage layers for:
+An implementation may emit GeoJSON or GeoPackage layers for:
 
 - raw and final traces;
 - topology-override polylines and affected areas;
@@ -466,28 +551,30 @@ Emit GeoJSON or GeoPackage layers for:
 - five region polygons;
 - anchors, failures, short-gap fills, and low-confidence points.
 
-These products are for inspection; the NetCDF/configuration pair is the
-scientific source of truth.
+These products are useful for inspection but are not required by the numerical
+geometry interface. The NetCDF/configuration pair is the scientific source of
+truth.
 
 ### 8.3 QA report
 
-The machine-readable report and rendered figures include:
+The required machine-readable report includes:
 
 - input and output identities;
 - counts by crossing status;
-- depth-residual median, p95, and maximum per trace;
-- raw-to-final RMS, p95, maximum, and Hausdorff displacement;
-- adjacent-point jump, curvature, and total-variation distributions;
+- independently evaluated native-depth adherence for natural-crossing points,
+  reported separately from topology overrides;
+- raw-to-final RMS, p95, and maximum displacement;
 - internal gap lengths and repairs;
 - area/length changed by each topology override;
-- region width extrema and polygon validity;
-- native/working-grid resolution sensitivity;
-- deterministic output hashes;
+- region width extrema and mapping validity;
+- canonical scientific-array hashes in the pinned reference environment;
 - comparison with previous 500 m and 1000 m products as regression evidence.
 
-Required visual panels show source bathymetry, unmodified and modified masks,
-raw crossings, final traces, status flags, topology overrides, all five region
-polygons, width versus latitude, depth residual, and legacy differences.
+The required visual review shows bathymetry, raw/final traces, ignored islands,
+topology overrides, status flags, the five region views, and width versus
+latitude. Polygon layers, Hausdorff distance, curvature/total-variation
+distributions, resolution-sensitivity panels, and legacy-difference panels are
+recommended extended QA rather than hard interface requirements.
 
 ## 9. Hard acceptance gates
 
@@ -495,28 +582,39 @@ A production geometry is rejected unless all hard gates pass:
 
 1. exactly six source bathymetric traces and five correctly mapped region
    views, plus derived `x_b` traces where required;
-2. explicit domains and `y_S < y_P < y_I < y_N`;
+2. explicit domains, `y_S < y_P < y_I < y_N`, `y_NI >= y_I`, and
+   `y_NP >= y_P`, with finite coverage over every effective interval;
 3. no unflagged search-window-edge fallback;
-4. no internal missing run longer than the configured gap tolerance;
+4. every in-domain sample is finite; every repaired gap is labelled and an
+   unfilled gap of any length is rejected;
 5. continuous Pacific longitudes with no antimeridian jump;
-6. positive `x_e-x_b` width everywhere in every region's continuous frame;
-7. valid, non-self-intersecting polygons with only intended shared boundaries;
-8. no unintended region overlap;
-9. all basin anchors lie inside the intended selected component and polygon;
-10. every regularized point maps to a valid target-depth crossing or carries an
-    explicit non-crossing status;
-11. target-depth residual metrics meet reviewed tolerances; a proposed initial
-    native-refinement gate is p95 no greater than 50 m;
-12. raw-to-final displacement stays below reviewed pointwise and Hausdorff
-    limits;
-13. every manual topology override is named and quantified;
-14. repeated runs with identical input/configuration produce identical output
-    hashes;
-15. Atlantic-only traces are identical to their global source traces;
-16. `x_b` is explicit or labelled as the `thin_wbc` approximation, never
-    silently equated with `x_w`.
-17. requested and effective outer limits are both recorded, and every shared
-    gateway has one consistent physical latitude.
+6. `x_w <= x_b < x_e` everywhere, with equality only under `thin_wbc`, and
+   every non-thin WBC width lies within reviewed bounds;
+7. exact region-to-trace mappings, positive region widths, and one consistent
+   physical latitude for every shared gateway;
+8. all anchors lie inside the selected global deep component and their named
+   basin partition/search corridor;
+9. ignored Madagascar/New Zealand fixtures cannot become final outer
+   boundaries or cause interval switching;
+10. every natural regularized point maps to a target-depth crossing within the
+    maximum native search distance, while every non-crossing point carries a
+    permitted explicit status and provenance;
+11. native-depth adherence meets reviewed tolerances but is not used as proof
+    of branch identity; partition, corridor, continuity, and search-distance
+    gates provide that proof;
+12. raw-to-final pointwise displacement stays below the reviewed limit;
+13. every manual topology override declares its mask operation, is named and
+    quantified, and all affected trace samples carry its ID;
+14. canonical scientific arrays repeat exactly for identical input/config in
+    the pinned reference environment; other supported environments pass
+    declared numerical tolerances;
+15. Atlantic-only traces and shared Atlantic `x_b` are identical to their
+    global source objects;
+16. requested, geometry-effective, and grid-sampled latitudes are named and
+    recorded separately; outer shifts meet tolerance and internal gateways do
+    not move;
+17. if optional polygons are emitted, they are valid, non-self-intersecting,
+    and have only intended overlap/shared boundaries.
 
 Numerical thresholds begin as proposed configuration and require scientific
 review against representative regions. A threshold is not loosened merely to
@@ -531,19 +629,26 @@ Small cyclic bathymetry fixtures test:
 - elevation sign and pixel-centre interpolation;
 - a contour crossing the dateline;
 - multiple islands and marginal-sea branches;
+- explicit Madagascar/New Zealand exclusion from outer-boundary selection;
 - an open/closed strait changed by a named narrow bridge;
+- `force_barrier`, `force_deep`, and `exclude_barrier_component` semantics;
+- override-derived trace samples retaining their override ID;
 - interval tracking through a temporary split;
+- exact gateway recrossing at a latitude between source rows;
 - configured endpoints versus illegal window fallbacks;
 - short and long internal gaps;
 - smoothing and snap-back displacement limits;
-- region polygon orientation, overlap, and shared boundaries;
-- `x_w`/`x_b` distinction and thin-WBC metadata.
+- requested versus geometry-effective versus grid-sampled boundaries;
+- shared `x_b` identity, `x_w <= x_b < x_e`, WBC-width limits, and thin-WBC
+  metadata;
+- optional region polygon orientation, overlap, and shared boundaries.
 
 ### Integration tests with repository data
 
 Opt-in tests requiring `data/untracked/GEBCO` verify source identity, run
-representative latitude bands, and compare deterministic hashes/metrics. A full
-global extraction is a slow pipeline test, not part of every unit-test run.
+representative latitude bands, and compare canonical array hashes in the
+pinned reference environment plus numerical metrics elsewhere. A full global
+extraction is a slow pipeline test, not part of every unit-test run.
 
 ### Regression is not acceptance
 
@@ -562,12 +667,12 @@ smoothing error the new pipeline is intended to detect.
 | Anchor on shelf/land | Configuration error with local diagnostic |
 | Open ITF/Bering/Caribbean topology | Review named override; do not add a broad dam |
 | Artificial bridge too wide | Fail changed-area/width gate |
-| Island or marginal sea causes interval switch | Flag low confidence; revise tracking/anchors |
+| Ignored island or marginal sea becomes an outer boundary | Hard failure; revise exclusion, partition, or corridor configuration |
 | Coarsening opens or closes a strait | Native-resolution sensitivity failure |
 | Search-window edge used as boundary | Hard failure unless configured endpoint |
 | Smoothing leaves requested isobath | Snap back or reject |
 | Negative/near-zero region width | Hard geometry failure |
-| Polygon self-intersection or unintended overlap | Hard geometry failure |
+| Optional polygon self-intersection or unintended overlap | Reject the spatial QA product; do not publish it |
 | Long missing trace section | Require scientific/configuration review |
 | Changed GEBCO/config without provenance change | Hash/provenance test failure |
 | Bathymetric `x_w` presented as physical `x_b` | Schema/metadata validation failure |
@@ -577,13 +682,15 @@ smoothing error the new pipeline is intended to detect.
 1. Define configuration and output schemas plus synthetic fixtures.
 2. Implement source validation, cyclic coordinates, and out-of-core working
    grid generation.
-3. Implement raw topology masks, named overrides, component selection, and
-   candidate interval enumeration.
+3. Implement raw topology masks, ignored-island filtering, named override
+   semantics, truncated model-domain component selection, and basin
+   partitions/corridors.
 4. Implement global interval tracking and native crossing refinement.
 5. Implement conservative regularization with snap-back and trace QA.
-6. Implement region assembly, polygons, `x_b` policy, and Atlantic view.
-7. Implement NetCDF/spatial/report writers and full deterministic integration
-   tests.
+6. Implement shared `x_b`, region assembly, boundary sampling, and the Atlantic
+   view; add optional polygons after the core mappings pass.
+7. Implement NetCDF/core-QA writers and full integration tests, followed by
+   optional spatial review products.
 
 This is a technical dependency order, not a predetermined branch or PR plan.
 The first full GEBCO extraction is not accepted until the hard gates and visual
@@ -599,10 +706,13 @@ Before implementation, review should settle:
 4. working-grid reduction rule near mixed land/ocean blocks;
 5. interval-tracking weights and confidence threshold;
 6. maximum short-gap length and regularization displacement;
-7. depth-residual and resolution-sensitivity gates;
+7. requested-to-effective boundary-shift tolerance, maximum native crossing
+   search distance, and depth-adherence gate;
 8. initial `x_b` policy and any WBC-width prescription;
 9. whether 500 m and 1000 m products are both required from the first
-   production implementation.
+   production implementation;
+10. which extended spatial and resolution-sensitivity QA products are required
+    for the first accepted extraction.
 
 ## 14. Source basis
 
@@ -622,3 +732,9 @@ The historical notebook is treated as a prototype. Its useful elements—small
 shelf-following bridges, separate trace domains, side-sea filtering, robust
 outlier handling, and smoothing—are retained only where they satisfy the
 stronger crossing, topology, determinism, and provenance contracts above.
+
+The no-ITF derivation and closing graph discussion in the multibasin writeup
+are normative for the domain: `y_S` is the external southern boundary at South
+America, while sectors 5 and 4 are intentionally composite regions north of
+that boundary. GEBCO cells south of `y_S` must not introduce an Antarctic
+connectivity path that is absent from the theory.
