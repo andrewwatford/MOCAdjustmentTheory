@@ -25,6 +25,15 @@ NON_ITF_BASIN_KEYS = (
     ATLANTIC_PACIFIC_TRANSITION,
 )
 
+BOUNDARY_TRACE_KEYS = (
+    "atlantic_west",
+    "atlantic_east",
+    "indian_west",
+    "indian_east",
+    "pacific_west",
+    "pacific_east",
+)
+
 _EXPECTED_CONNECTIONS = MappingProxyType(
     {
         "T_S": (None, ATLANTIC_PACIFIC_TRANSITION),
@@ -171,6 +180,99 @@ class MultiBasinTopology:
     the graph, east-to-west child order, gateway latitudes, and shared boundary
     identity specified by the non-ITF theory.
     """
+
+    @classmethod
+    def from_traces(
+        cls,
+        traces: Mapping[str, BoundaryTrace],
+        *,
+        southern_boundary: float = -56.0,
+        pacific_gateway: float = -44.0,
+        indian_gateway: float = -35.0,
+        atlantic_north: float = 55.0,
+    ) -> MultiBasinTopology:
+        """Assemble the five non-ITF basins from six shared traces.
+
+        Indian and Pacific northern closures are derived independently from
+        the northernmost common valid sample of their western and eastern
+        traces. They may therefore lie north of ``atlantic_north``.
+
+        Parameters
+        ----------
+        traces
+            Mapping containing exactly the six names in
+            :data:`BOUNDARY_TRACE_KEYS`.
+        southern_boundary
+            Southern end of the combined Atlantic--Pacific sector.
+        pacific_gateway
+            Latitude where the Pacific branches from the remaining basins.
+        indian_gateway
+            Latitude where the Indian branches from the Atlantic.
+        atlantic_north
+            Northern limit of the Atlantic domain only.
+        """
+
+        if set(traces) != set(BOUNDARY_TRACE_KEYS):
+            missing = sorted(set(BOUNDARY_TRACE_KEYS) - set(traces))
+            extra = sorted(set(traces) - set(BOUNDARY_TRACE_KEYS))
+            raise ValueError(
+                "boundary traces must contain exactly the fixed six names; "
+                f"missing={missing}, extra={extra}"
+            )
+
+        t = traces
+        indian_north = t["indian_west"].common_northern_limit(
+            t["indian_east"]
+        )
+        pacific_north = t["pacific_west"].common_northern_limit(
+            t["pacific_east"]
+        )
+        basins = (
+            Basin(
+                key=ATLANTIC_NORTH,
+                western_boundary=t["atlantic_west"],
+                eastern_boundary=t["atlantic_east"],
+                southern_boundary=indian_gateway,
+                northern_boundary=atlantic_north,
+                inflows=("T_A",),
+                outflows=("T_N",),
+            ),
+            Basin(
+                key=INDIAN_NORTH,
+                western_boundary=t["indian_west"],
+                eastern_boundary=t["indian_east"],
+                southern_boundary=indian_gateway,
+                northern_boundary=indian_north,
+                inflows=("T_I",),
+            ),
+            Basin(
+                key=PACIFIC_NORTH,
+                western_boundary=t["pacific_west"],
+                eastern_boundary=t["pacific_east"],
+                southern_boundary=pacific_gateway,
+                northern_boundary=pacific_north,
+                inflows=("T_P",),
+            ),
+            Basin(
+                key=ATLANTIC_INDIAN_TRANSITION,
+                western_boundary=t["atlantic_west"],
+                eastern_boundary=t["indian_east"],
+                southern_boundary=pacific_gateway,
+                northern_boundary=indian_gateway,
+                inflows=("T_T",),
+                outflows=("T_I", "T_A"),
+            ),
+            Basin(
+                key=ATLANTIC_PACIFIC_TRANSITION,
+                western_boundary=t["atlantic_west"],
+                eastern_boundary=t["pacific_east"],
+                southern_boundary=southern_boundary,
+                northern_boundary=pacific_gateway,
+                inflows=("T_S",),
+                outflows=("T_P", "T_T"),
+            ),
+        )
+        return cls(basins)
 
     def __init__(self, basins: Iterable[Basin]) -> None:
         basin_list = tuple(basins)

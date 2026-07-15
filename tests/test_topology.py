@@ -57,6 +57,34 @@ def test_non_itf_topology_has_exact_graph(
     )
 
 
+def test_topology_factory_assembles_shared_traces_and_independent_norths(
+    boundary_traces: dict[str, BoundaryTrace],
+) -> None:
+    topology = MultiBasinTopology.from_traces(boundary_traces)
+
+    assert topology.basin("indian_north").northern_boundary == 58.0
+    assert topology.basin("pacific_north").northern_boundary == 60.0
+    assert topology.basin("atlantic_north").northern_boundary == 55.0
+    assert (
+        topology.basin("atlantic_north").western_boundary
+        is topology.basin("atlantic_pacific_transition").western_boundary
+    )
+    assert (
+        topology.basin("indian_north").eastern_boundary
+        is topology.basin("atlantic_indian_transition").eastern_boundary
+    )
+
+
+def test_topology_factory_requires_exact_trace_set(
+    boundary_traces: dict[str, BoundaryTrace],
+) -> None:
+    incomplete = dict(boundary_traces)
+    incomplete.pop("pacific_west")
+
+    with pytest.raises(ValueError, match="missing=.*pacific_west"):
+        MultiBasinTopology.from_traces(incomplete)
+
+
 def test_topology_preserves_boundary_identity_and_atlantic_path(
     non_itf_basins: tuple[Basin, ...],
 ) -> None:
