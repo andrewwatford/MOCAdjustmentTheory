@@ -731,7 +731,7 @@ underdetermined bin, drops a Nyquist bin, or changes a forcing component.
 - Analytic sinusoidal-delay phase test.
 - Global assembled matrix matches the `F/r` matrix above up to a declared
   permutation.
-- Production `Q/K` and oracle `F/r` formulations agree when driven by the same
+- Production `Q/K` and normative `F/r` formulations agree when driven by the same
   wind stress.
 - The solved state closes the independently assembled seven unreduced global
   budget and branch residuals.
@@ -763,7 +763,8 @@ underdetermined bin, drops a Nyquist bin, or changes a forcing component.
    operators.
 3. Implement `FourierPlan` and isolated region response kernels.
 4. Implement the Atlantic-only scalar solver and analytic benchmark tests.
-5. Implement the explicit non-ITF global matrix and `F/r` oracle.
+5. Implement the explicit non-ITF global matrix, normative `F/r` reference,
+   and independently assembled seven-equation residual check.
 6. Implement labelled diagnostics and physical-ocean views.
 7. Add real-data integration workflows and worked examples only after all
    synthetic acceptance tests pass.
