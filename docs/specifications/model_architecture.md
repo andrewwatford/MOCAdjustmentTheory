@@ -112,12 +112,12 @@ particular bathymetry or wind grid.
 ### 3.1 Directed topology
 
 ```mermaid
-flowchart BT
+graph BT
     S["External south"] --> R5["5: Atlantic-Pacific transition"]
-    R5 -->|"Pacific branch T_P"| R3["3: Pacific north"]
-    R5 -->|"Transition T_T"| R4["4: Atlantic-Indian transition"]
-    R4 -->|"Indian branch T_I"| R2["2: Indian north"]
-    R4 -->|"Atlantic continuation T_A"| R1["1: Atlantic north"]
+    R5 -->|Pacific branch T_P| R3["3: Pacific north"]
+    R5 -->|Transition T_T| R4["4: Atlantic-Indian transition"]
+    R4 -->|Indian branch T_I| R2["2: Indian north"]
+    R4 -->|Atlantic continuation T_A| R1["1: Atlantic north"]
     R1 --> N["External north"]
 ```
 

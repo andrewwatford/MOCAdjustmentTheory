@@ -1,2 +1,1 @@
-mermaid.initialize({ startOnLoad: false });
-mermaid.run({ querySelector: ".mermaid" });
+mermaid.initialize({ startOnLoad: true });
