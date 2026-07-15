@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS filesystem metadata
+.DS_Store
+
+# Large, local-only scientific inputs. Keep only the directory marker in Git.
+data/untracked/**
+!data/untracked/.gitkeep
