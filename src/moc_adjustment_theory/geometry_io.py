@@ -26,36 +26,6 @@ def _trace_lookup(topology: MultiBasinTopology) -> dict[str, BoundaryTrace]:
     return traces
 
 
-def _interpolate_trace(
-    trace: BoundaryTrace, latitude: np.ndarray
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    valid = (latitude >= trace.southern_latitude) & (
-        latitude <= trace.northern_latitude
-    )
-    longitude = np.full(latitude.size, np.nan)
-    longitude[valid] = np.interp(
-        latitude[valid],
-        trace.latitude[trace.valid],
-        trace.longitude[trace.valid],
-    )
-
-    raw = np.full(latitude.size, np.nan)
-    raw_source = np.asarray(trace.raw_longitude)
-    raw_valid = trace.valid & np.isfinite(raw_source)
-    if np.count_nonzero(raw_valid) >= 2:
-        raw[valid] = np.interp(
-            latitude[valid], trace.latitude[raw_valid], raw_source[raw_valid]
-        )
-    else:
-        raw[valid] = longitude[valid]
-
-    repaired = np.zeros(latitude.size, dtype=bool)
-    repaired_latitude = trace.latitude[trace.repaired]
-    if repaired_latitude.size:
-        repaired[np.isin(latitude, repaired_latitude)] = True
-    return longitude, raw, valid, repaired
-
-
 def topology_to_dataset(topology: MultiBasinTopology) -> xr.Dataset:
     """Serialize topology geometry to a compact trace-by-latitude dataset.
 
@@ -74,9 +44,12 @@ def topology_to_dataset(topology: MultiBasinTopology) -> xr.Dataset:
     """
 
     traces = _trace_lookup(topology)
-    latitude = np.unique(
-        np.concatenate([traces[key].latitude for key in BOUNDARY_TRACE_KEYS])
-    )
+    latitude = np.asarray(traces[BOUNDARY_TRACE_KEYS[0]].latitude)
+    if any(
+        not np.array_equal(traces[key].latitude, latitude)
+        for key in BOUNDARY_TRACE_KEYS[1:]
+    ):
+        raise ValueError("all six traces must share one exact latitude grid")
     longitude = np.full((len(BOUNDARY_TRACE_KEYS), latitude.size), np.nan)
     longitude_raw = np.full_like(longitude, np.nan)
     valid = np.zeros_like(longitude, dtype=bool)
@@ -84,12 +57,11 @@ def topology_to_dataset(topology: MultiBasinTopology) -> xr.Dataset:
     provenance = []
 
     for index, key in enumerate(BOUNDARY_TRACE_KEYS):
-        (
-            longitude[index],
-            longitude_raw[index],
-            valid[index],
-            repaired[index],
-        ) = _interpolate_trace(traces[key], latitude)
+        trace = traces[key]
+        longitude[index] = trace.longitude
+        longitude_raw[index] = trace.raw_longitude
+        valid[index] = trace.valid
+        repaired[index] = trace.repaired
         provenance.append(json.dumps(dict(traces[key].provenance), sort_keys=True))
 
     basin_keys = topology.basin_keys
@@ -176,10 +148,34 @@ def topology_from_dataset(dataset: xr.Dataset) -> MultiBasinTopology:
             provenance=provenance,
         )
 
-    return MultiBasinTopology.from_traces(
+    topology = MultiBasinTopology.from_traces(
         traces,
         southern_boundary=float(dataset.attrs["southern_boundary"]),
         pacific_gateway=float(dataset.attrs["pacific_gateway"]),
         indian_gateway=float(dataset.attrs["indian_gateway"]),
         atlantic_north=float(dataset.attrs["atlantic_north"]),
     )
+    basin_keys = tuple(map(str, dataset.basin.values))
+    if basin_keys != topology.basin_keys:
+        raise ValueError("serialized basin order does not match the fixed topology")
+    expected_west = tuple(
+        topology.basin(key).western_boundary.key for key in basin_keys
+    )
+    expected_east = tuple(
+        topology.basin(key).eastern_boundary.key for key in basin_keys
+    )
+    expected_south = np.array(
+        [topology.basin(key).southern_boundary for key in basin_keys]
+    )
+    expected_north = np.array(
+        [topology.basin(key).northern_boundary for key in basin_keys]
+    )
+    if tuple(map(str, dataset.basin_west_trace.values)) != expected_west:
+        raise ValueError("serialized western trace mapping is inconsistent")
+    if tuple(map(str, dataset.basin_east_trace.values)) != expected_east:
+        raise ValueError("serialized eastern trace mapping is inconsistent")
+    if not np.array_equal(dataset.basin_southern_latitude.values, expected_south):
+        raise ValueError("serialized southern basin limits are inconsistent")
+    if not np.array_equal(dataset.basin_northern_latitude.values, expected_north):
+        raise ValueError("serialized northern basin limits are inconsistent")
+    return topology
