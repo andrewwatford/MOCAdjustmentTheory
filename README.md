@@ -31,5 +31,5 @@ from moc_adjustment_theory import hello_world
 assert hello_world() == "Hello, world!"
 ```
 
-See the [documentation](docs/index.md) for the corresponding command-line
-smoke test.
+See the [deployed documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)
+for the corresponding command-line smoke test.

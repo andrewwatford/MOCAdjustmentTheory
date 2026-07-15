@@ -41,6 +41,7 @@ moc-adjustment-theory = "moc_adjustment_theory.hello:main"
 
 [project.urls]
 Repository = "https://github.com/andrewwatford/MOCAdjustmentTheory"
+Documentation = "https://andrewwatford.github.io/MOCAdjustmentTheory/"
 
 [tool.setuptools.packages.find]
 where = ["src"]
