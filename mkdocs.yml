@@ -8,5 +8,6 @@ theme:
 
 nav:
   - Home: index.md
+  - Geometry pipeline: specifications/geometry_pipeline.md
 
 strict: true
