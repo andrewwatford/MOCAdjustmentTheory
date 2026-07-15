@@ -22,4 +22,3 @@ def test_hello_world_rejects_empty_names(invalid: str) -> None:
 def test_hello_world_rejects_non_strings() -> None:
     with pytest.raises(TypeError, match="must be a string"):
         hello_world(42)  # type: ignore[arg-type]
-

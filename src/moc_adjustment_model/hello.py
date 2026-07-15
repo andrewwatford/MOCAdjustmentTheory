@@ -21,4 +21,3 @@ def main() -> None:
     """Print the scaffold greeting for the temporary console command."""
 
     print(hello_world("MOC adjustment model"))
-

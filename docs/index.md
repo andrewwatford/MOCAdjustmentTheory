@@ -26,4 +26,3 @@ The same check is available from a shell:
 $ python -m moc_adjustment_model
 Hello, MOC adjustment model!
 ```
-
