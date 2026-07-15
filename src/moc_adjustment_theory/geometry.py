@@ -198,4 +198,3 @@ class BoundaryTrace:
                 f"or south of {cap}"
             )
         return float(common[-1])
-

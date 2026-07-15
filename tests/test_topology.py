@@ -127,6 +127,28 @@ def test_topology_rejects_mismatched_gateway(
         MultiBasinTopology(basins)
 
 
+@pytest.mark.parametrize(
+    ("basin_index", "premature_limit", "match"),
+    [
+        (1, 49.0, "Indian northern closure"),
+        (2, 51.0, "Pacific northern closure"),
+    ],
+)
+def test_topology_rejects_premature_northern_closure(
+    non_itf_basins: tuple[Basin, ...],
+    basin_index: int,
+    premature_limit: float,
+    match: str,
+) -> None:
+    basins = list(non_itf_basins)
+    basins[basin_index] = replace(
+        basins[basin_index], northern_boundary=premature_limit
+    )
+
+    with pytest.raises(ValueError, match=match):
+        MultiBasinTopology(basins)
+
+
 def test_topology_rejects_copied_shared_boundary(
     non_itf_basins: tuple[Basin, ...],
 ) -> None:
@@ -164,4 +186,3 @@ def test_public_api_exports_scientific_objects() -> None:
     assert PublicBasin is Basin
     assert PublicBoundaryTrace is BoundaryTrace
     assert PublicTopology is MultiBasinTopology
-

@@ -95,4 +95,3 @@ def non_itf_basins(boundary_traces: dict[str, BoundaryTrace]) -> tuple[Basin, ..
             outflows=("T_P", "T_T"),
         ),
     )
-

@@ -100,4 +100,3 @@ def test_trace_provenance_is_immutable() -> None:
 
     with pytest.raises(TypeError):
         trace.provenance["source"] = "changed"  # type: ignore[index]
-

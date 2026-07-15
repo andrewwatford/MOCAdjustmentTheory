@@ -278,10 +278,22 @@ class MultiBasinTopology:
             == r1.southern_boundary
         ):
             raise ValueError("Indian gateway latitude is inconsistent")
-        if r2.northern_boundary > r1.northern_boundary:
-            raise ValueError("Indian northern closure must be at or south of y_N")
-        if r3.northern_boundary > r1.northern_boundary:
-            raise ValueError("Pacific northern closure must be at or south of y_N")
+        indian_limit = r2.western_boundary.common_northern_limit(
+            r2.eastern_boundary, cap=r1.northern_boundary
+        )
+        if not np.isclose(r2.northern_boundary, indian_limit):
+            raise ValueError(
+                "Indian northern closure must be the northernmost common "
+                "boundary sample at or south of y_N"
+            )
+        pacific_limit = r3.western_boundary.common_northern_limit(
+            r3.eastern_boundary, cap=r1.northern_boundary
+        )
+        if not np.isclose(r3.northern_boundary, pacific_limit):
+            raise ValueError(
+                "Pacific northern closure must be the northernmost common "
+                "boundary sample at or south of y_N"
+            )
 
         expected_traces = {
             ATLANTIC_NORTH: ("atlantic_west", "atlantic_east"),
@@ -378,4 +390,3 @@ class MultiBasinTopology:
 
     def __len__(self) -> int:
         return len(self._basins)
-
