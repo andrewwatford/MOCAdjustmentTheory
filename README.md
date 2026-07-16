@@ -1,18 +1,12 @@
 # MOC Adjustment Theory
 
-`moc-adjustment-theory` will provide modular reduced-gravity models of
+`moc-adjustment-theory` implements a global, linear reduced-gravity model of
 meridional-overturning-circulation adjustment in connected ocean basins.
-
-The repository is currently in its documentation-first setup phase. The only
-public function is a temporary `hello_world` smoke test; scientific model code
-will be added only after its abstractions and geometry pipeline have been
-reviewed.
 
 ## Install from source
 
 ```bash
 python -m pip install .
-python -m moc_adjustment_theory
 ```
 
 ## Install for development
@@ -23,13 +17,22 @@ python -m pytest
 python -m mkdocs build --strict
 ```
 
-## Temporary API
+## API
 
 ```python
-from moc_adjustment_theory import hello_world
+import xarray as xr
 
-assert hello_world() == "Hello, world!"
+from moc_adjustment_theory import GlobalAdjustmentModel
+
+isobath = xr.open_dataset("data/tracked/isobath/global_isobath_GEBCO_1000m.nc")
+forcing = xr.open_dataset("data/untracked/forcing/global_ERA5_SCOTIA_forcing.nc")
+
+model = GlobalAdjustmentModel(isobath, g_prime=0.02)
+solution = model.solve(
+    forcing,
+    sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
+)
 ```
 
 See the [deployed documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)
-for the corresponding command-line smoke test.
+for the theory, input schema, and API reference.

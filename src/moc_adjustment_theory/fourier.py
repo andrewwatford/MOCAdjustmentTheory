@@ -21,20 +21,28 @@ def forward_transform(
     norm: FFTNorm = "backward",
     require_zero_mean: bool = True,
     zero_mean_rtol: float = 1e-7,
+    sample_spacing_seconds: float | None = None,
 ) -> xr.DataArray:
     """Transform real, uniformly sampled data to angular-frequency space.
 
-    The transform uses :func:`numpy.fft.rfft`, causal right-zero-padding to
-    ``pad_factor`` times the input length, and angular frequency in rad/s. No
-    detrending or window is applied. By default, each time series must have a
-    mean no larger than ``zero_mean_rtol`` times the field-wide maximum absolute
-    value. Metadata needed for an exact, stateless inverse is attached to the
-    result.
+    The transform uses `numpy.fft.rfft`, causal right-zero-padding to the
+    smallest odd length at least ``pad_factor`` times the input length, and
+    angular frequency in rad/s. The default padded length is therefore
+    ``2N + 1``; the odd length avoids a self-conjugate Nyquist bin when the model
+    applies complex travel-time phases. No detrending or window is applied. By
+    default, each time series must have a mean no larger than
+    ``zero_mean_rtol`` times the field-wide maximum absolute value. Accepted
+    roundoff-level means are set exactly to zero in frequency space.
+    ``sample_spacing_seconds`` may explicitly supply the physical sample
+    interval for monotonically increasing but nonuniform calendar labels. For
+    monthly data, this project uses ``365.25 / 12`` days per sample. Metadata
+    needed for an exact, stateless inverse is attached to the result.
     """
     _validate_contract(time_dim, omega_dim, pad_factor, norm)
     if not isinstance(require_zero_mean, bool):
         raise TypeError("require_zero_mean must be a bool")
     _validate_tolerance(zero_mean_rtol, "zero_mean_rtol")
+    _validate_sample_spacing(sample_spacing_seconds)
     if not isinstance(data, xr.DataArray):
         raise TypeError("data must be an xarray.DataArray")
     if time_dim not in data.dims:
@@ -42,7 +50,9 @@ def forward_transform(
     if omega_dim in data.dims:
         raise ValueError(f"data already has an {omega_dim!r} dimension")
 
-    time_ns, dt_seconds = _validated_time(data, time_dim)
+    time_ns, dt_seconds = _validated_time(
+        data, time_dim, sample_spacing_seconds
+    )
     values = np.asarray(data.data)
     _validate_real_finite(values, "data")
     axis = data.get_axis_num(time_dim)
@@ -56,8 +66,14 @@ def forward_transform(
             )
 
     original_length = data.sizes[time_dim]
-    padded_length = pad_factor * original_length
+    padded_length = _padded_length(original_length, pad_factor)
     transformed = np.fft.rfft(values, n=padded_length, axis=axis, norm=norm)
+    if require_zero_mean:
+        # The anomaly contract is exact in spectral space even when float32
+        # storage leaves a small residual after demeaning.
+        index = [slice(None)] * transformed.ndim
+        index[axis] = 0
+        transformed[tuple(index)] = 0.0
     omega = 2.0 * np.pi * np.fft.rfftfreq(padded_length, d=dt_seconds)
     dims = tuple(omega_dim if dim == time_dim else dim for dim in data.dims)
     coords = {
@@ -81,6 +97,7 @@ def forward_transform(
         "pad_factor": pad_factor,
         "dt_seconds": dt_seconds,
         "norm": norm,
+        "sample_spacing_seconds": sample_spacing_seconds,
     }
     return xr.DataArray(
         transformed,
@@ -99,17 +116,21 @@ def inverse_transform(
     pad_factor: int = 2,
     norm: FFTNorm = "backward",
     imaginary_rtol: float = 1e-12,
+    sample_spacing_seconds: float | None = None,
 ) -> xr.DataArray:
-    """Invert a spectrum made by :func:`forward_transform` onto its time grid.
+    """Invert a spectrum made by `forward_transform` onto its time grid.
 
     The inverse validates the explicit transform contract against spectral
-    metadata, applies :func:`numpy.fft.irfft`, and removes the causal right
-    padding. Imaginary DC and Nyquist components, which cannot represent a real
-    time series, are rejected above ``imaginary_rtol`` relative to the largest
-    spectral magnitude in the corresponding series.
+    metadata, applies `numpy.fft.irfft`, and removes the causal right
+    padding. An imaginary DC component, which cannot represent a real time
+    series, is rejected above ``imaginary_rtol`` relative to the largest
+    spectral magnitude in the corresponding series. The odd padded length has
+    no self-conjugate Nyquist component. When an explicit physical sample
+    interval was used, the original calendar labels are still restored.
     """
     _validate_contract(time_dim, omega_dim, pad_factor, norm)
     _validate_tolerance(imaginary_rtol, "imaginary_rtol")
+    _validate_sample_spacing(sample_spacing_seconds)
     if not isinstance(spectrum, xr.DataArray):
         raise TypeError("spectrum must be an xarray.DataArray")
     if omega_dim not in spectrum.dims:
@@ -125,6 +146,7 @@ def inverse_transform(
         "omega_dim": omega_dim,
         "pad_factor": pad_factor,
         "norm": norm,
+        "sample_spacing_seconds": sample_spacing_seconds,
     }
     for key, expected in expected_contract.items():
         if metadata.get(key) != expected:
@@ -135,7 +157,7 @@ def inverse_transform(
 
     original_length = _metadata_int(metadata, "original_length")
     padded_length = _metadata_int(metadata, "padded_length")
-    if padded_length != pad_factor * original_length:
+    if padded_length != _padded_length(original_length, pad_factor):
         raise ValueError("inconsistent transform lengths in spectral metadata")
     expected_size = padded_length // 2 + 1
     if spectrum.sizes[omega_dim] != expected_size:
@@ -161,9 +183,6 @@ def inverse_transform(
     scale = np.max(np.abs(values), axis=axis)
     dc_imaginary = np.abs(np.take(values, 0, axis=axis).imag)
     inconsistent = dc_imaginary > imaginary_rtol * scale
-    if padded_length % 2 == 0:
-        nyquist_imaginary = np.abs(np.take(values, -1, axis=axis).imag)
-        inconsistent |= nyquist_imaginary > imaginary_rtol * scale
     if np.any(inconsistent):
         raise ValueError("spectrum is inconsistent with a real time series")
 
@@ -204,6 +223,7 @@ def inverse_transform(
 def _validate_contract(
     time_dim: str, omega_dim: str, pad_factor: int, norm: FFTNorm
 ) -> None:
+    """Validate dimension names, padding, and NumPy normalization."""
     if not isinstance(time_dim, str) or not time_dim:
         raise TypeError("time_dim must be a nonempty string")
     if not isinstance(omega_dim, str) or not omega_dim:
@@ -219,13 +239,35 @@ def _validate_contract(
 
 
 def _validate_tolerance(value: float, name: str) -> None:
+    """Require a finite, nonnegative numerical tolerance."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a real number")
     if not np.isfinite(value) or value < 0:
         raise ValueError(f"{name} must be finite and nonnegative")
 
 
-def _validated_time(data: xr.DataArray, time_dim: str) -> tuple[np.ndarray, float]:
+def _padded_length(original_length: int, pad_factor: int) -> int:
+    """Return the smallest odd FFT length meeting the requested padding."""
+    minimum = pad_factor * original_length
+    return minimum if minimum % 2 else minimum + 1
+
+
+def _validate_sample_spacing(value: float | None) -> None:
+    """Validate an optional physical sample interval in seconds."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("sample_spacing_seconds must be a real number or None")
+    if not np.isfinite(value) or value <= 0:
+        raise ValueError("sample_spacing_seconds must be finite and positive")
+
+
+def _validated_time(
+    data: xr.DataArray,
+    time_dim: str,
+    sample_spacing_seconds: float | None,
+) -> tuple[np.ndarray, float]:
+    """Return timestamps and the validated or explicitly supplied interval."""
     if time_dim not in data.coords or data[time_dim].dims != (time_dim,):
         raise ValueError(f"{time_dim!r} must have a one-dimensional coordinate")
     time = np.asarray(data[time_dim].values)
@@ -239,12 +281,18 @@ def _validated_time(data: xr.DataArray, time_dim: str) -> tuple[np.ndarray, floa
     steps = np.diff(time_ns)
     if np.any(steps <= 0):
         raise ValueError(f"{time_dim!r} coordinate must be strictly increasing")
-    if np.any(steps != steps[0]):
+    if sample_spacing_seconds is None and np.any(steps != steps[0]):
         raise ValueError(f"{time_dim!r} coordinate must be uniformly spaced")
-    return time_ns, float(steps[0]) / 1e9
+    dt_seconds = (
+        float(steps[0]) / 1e9
+        if sample_spacing_seconds is None
+        else float(sample_spacing_seconds)
+    )
+    return time_ns, dt_seconds
 
 
 def _validate_numeric_finite(values: np.ndarray, name: str) -> None:
+    """Require numeric values without NaNs or infinities."""
     if not np.issubdtype(values.dtype, np.number):
         raise TypeError(f"{name} must contain numeric values")
     if not np.all(np.isfinite(values)):
@@ -252,12 +300,14 @@ def _validate_numeric_finite(values: np.ndarray, name: str) -> None:
 
 
 def _validate_real_finite(values: np.ndarray, name: str) -> None:
+    """Require finite real-valued input for a real Fourier transform."""
     _validate_numeric_finite(values, name)
     if np.iscomplexobj(values):
         raise TypeError(f"{name} must contain real values")
 
 
 def _metadata_int(metadata: Mapping[object, object], key: str) -> int:
+    """Read a positive integer from stored transform metadata."""
     value = metadata.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError(f"invalid {key} in spectral metadata")

@@ -51,6 +51,30 @@ def forcing(t_n=(0.0, 1.0e6), wind=False):
     return dataset
 
 
+def temporal_forcing():
+    """Return zero-mean monthly forcing on the synthetic global grid."""
+    time = np.array(
+        [
+            "2000-01-01",
+            "2000-02-01",
+            "2000-03-01",
+            "2000-04-01",
+        ],
+        dtype="datetime64[D]",
+    )
+    latitude = np.arange(-50.0, 71.0, 10.0)
+    longitude = np.arange(-80.0, 291.0, 10.0)
+    zeros = np.zeros((time.size, latitude.size, longitude.size))
+    return xr.Dataset(
+        {
+            "M_Ek_x": (("time", "latitude", "longitude"), zeros),
+            "M_Ek_y": (("time", "latitude", "longitude"), zeros),
+            "T_N": ("time", [0.0, 1.0e6, 0.0, -1.0e6]),
+        },
+        coords={"time": time, "latitude": latitude, "longitude": longitude},
+    )
+
+
 def test_unforced_wind_solution_closes_regional_budgets():
     result = GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(forcing())
 
@@ -131,3 +155,38 @@ def test_boundary_solution_satisfies_three_basin_system():
 def test_nonzero_dc_forcing_is_rejected():
     with pytest.raises(ValueError, match="zero-frequency forcing"):
         GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(forcing(t_n=(1.0, 0.0)))
+
+
+def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
+    """The temporal solve applies one FFT contract in both directions."""
+    input_forcing = temporal_forcing()
+    spacing = 365.25 / 12 * 24 * 60 * 60
+
+    result = GlobalAdjustmentModel(geometry(), 0.02).solve(
+        input_forcing,
+        sample_spacing_seconds=spacing,
+    )
+
+    assert set(result) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
+    np.testing.assert_array_equal(result.time, input_forcing.time)
+    assert result.h_e.dims == ("time", "region")
+    assert result.T.dims == ("time", "region", "latitude")
+    np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
+    for name in result.data_vars:
+        assert np.all(np.isfinite(result[name].fillna(0)))
+
+
+def test_solve_infers_daily_spacing() -> None:
+    """A uniform daily grid needs no explicit physical interval."""
+    input_forcing = temporal_forcing().assign_coords(
+        time=np.datetime64("2000-01-01")
+        + np.arange(4) * np.timedelta64(1, "D")
+    )
+
+    result = GlobalAdjustmentModel(geometry(), 0.02).solve(
+        input_forcing,
+        omega_dim="angular_frequency",
+    )
+
+    np.testing.assert_array_equal(result.time, input_forcing.time)
+    assert "angular_frequency" not in result.dims

@@ -16,8 +16,8 @@ The user workflow is:
 
 Users provide the forcing and isobath datasets, and the model returns another
 dataset. The Fourier interface is the stateless `forward_transform` and
-`inverse_transform` function pair. `GlobalAdjustmentModel` is the intended
-model interface; its integration with these functions is not yet implemented.
+`inverse_transform` function pair. `GlobalAdjustmentModel.solve()` applies that
+pair consistently around the frequency-space model.
 
 ## Theory
 
@@ -148,10 +148,9 @@ The intended interface is:
 ```python
 model = GlobalAdjustmentModel(
     isobath_ds=isobath_ds,
-    forcing_ds=forcing_ds,
     g_prime=g_prime,  # m s^-2
 )
-solution_ds = model.solve()
+solution_ds = model.solve(forcing_ds)
 ```
 
 ### Active-layer dataset
