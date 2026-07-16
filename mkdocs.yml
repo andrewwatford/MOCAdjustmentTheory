@@ -2,6 +2,7 @@ site_name: MOC Adjustment Theory
 site_description: Modular models of meridional-overturning-circulation adjustment
 site_url: https://andrewwatford.github.io/MOCAdjustmentTheory/
 repo_url: https://github.com/andrewwatford/MOCAdjustmentTheory
+use_directory_urls: false
 
 theme:
   name: material
@@ -15,6 +16,13 @@ markdown_extensions:
           class: mermaid
           format: !!python/name:pymdownx.superfences.fence_code_format
 
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
 extra_javascript:
   - javascripts/mathjax.js
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
@@ -23,6 +31,6 @@ extra_javascript:
 
 nav:
   - Home: index.md
-  - Specifications: specifications.md
+  - API reference: api.md
 
 strict: true
