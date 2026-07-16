@@ -8,16 +8,16 @@ The user workflow is simple:
 
 1. Construct an `xr.Dataset` that includes the boundaries of the active layer, typically a prescribed isobath.
 2. Construct an `xr.Dataset` that includes an Ekman forcing field and a timeseries of northern boundary forcing. 
-3. Define a `FourierConvention` object for use in the solve.
+3. Define a `FourierTransformer` object for use in the solve.
 4. Pass all three of those, along with the reduced gravity $g'$, to the `GlobalAdjustmentModel` constructor.
 5. View your results in an output `xr.Dataset`!
 
 ## 2. Public objects
 
 The user should really be constructing their own forcing fields and isobath datasets; the output of the model is also an `xr.Dataset`.
-Thus, the only real public objects are the `GlobalAdjustmentModel` and `FourierConvention` objects.
+Thus, the only real public objects are the `GlobalAdjustmentModel` and `FourierTransformer` objects.
 
-## 4. The theory itself
+## 3. The theory itself
 The theory itself is quite simple.
 We divide the ocean into five regions, inferred from the isobath file provided.
 
@@ -148,7 +148,7 @@ As mentioned, the basic use for the `GlobalAdjustmentModel` is as follows:
 model = GlobalAdjustmentModel(
   isobath_ds = isobath_ds,
   forcing_ds = forcing_ds,
-  fourier_convention = fc,
+  fourier_transformer = ft,
   g_prime = g # m/s**2
 )
 solution_ds = model.solve()
@@ -180,9 +180,10 @@ Because of ambiguities surrounding Ekman upwelling at the equator, Ekman transpo
 Transport at the southern boundary of the three-basin domain is assumed to be entirely wind-driven, and is derived by integrating $M_{Ek, y}$ across the southern latitude.
 Similarly, Ekman upwelling is computed as the divergence of the Ekman transport: $w_{Ek} = \nabla \cdot \mathbf{M}_{Ek, y}$.
 
-### 4.3 The FourierConvention
+### 4.3 The FourierTransformer
 To be honest I am not terribly comfortable with the subtleties around solving problems in frequency space. 
 This will have to be fleshed out more as we go along.
+The idea is that this is something that acts on DataArrays and Fourier / Inverse Fourier Transforms them consistently.
 
 ### 4.4 The output dataset
 The output dataset consists of:
