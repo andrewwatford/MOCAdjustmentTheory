@@ -39,16 +39,6 @@ RHO_0 = 1027.0
 G_PRIME = 0.02
 H = 1000.0
 
-TRACE_VARIABLES = {
-    "atlantic_west": "x_wA",
-    "atlantic_east": "x_eA",
-    "indian_west": "x_wI",
-    "indian_east": "x_eI",
-    "pacific_west": "x_wP",
-    "pacific_east": "x_eP",
-}
-
-
 def _f(latitude: xr.DataArray | np.ndarray | float) -> object:
     return 2.0 * OMEGA * np.sin(np.deg2rad(latitude))
 
@@ -163,12 +153,36 @@ def _geometry_and_limits() -> tuple[MultiBasinGeometry, dict[str, float]]:
             "north": limits["y_P"],
         },
     }
+    isobaths = isobaths.rename(
+        {
+            "x_wA": "atlantic_west",
+            "x_eA": "atlantic_east",
+            "x_wI": "indian_west",
+            "x_eI": "indian_east",
+            "x_wP": "pacific_west",
+            "x_eP": "pacific_east",
+        }
+    )
+    regions = list(definitions)
+    isobaths = isobaths.assign_coords(region=regions)
+    isobaths["region_west_trace"] = (
+        "region",
+        [str(definitions[key]["west"]) for key in regions],
+    )
+    isobaths["region_east_trace"] = (
+        "region",
+        [str(definitions[key]["east"]) for key in regions],
+    )
+    isobaths["region_south"] = (
+        "region",
+        [float(definitions[key]["south"]) for key in regions],
+    )
+    isobaths["region_north"] = (
+        "region",
+        [float(definitions[key]["north"]) for key in regions],
+    )
     return (
-        MultiBasinGeometry.from_isobath_dataset(
-            isobaths,
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=definitions,
-        ),
+        MultiBasinGeometry.from_isobath_dataset(isobaths),
         limits,
     )
 

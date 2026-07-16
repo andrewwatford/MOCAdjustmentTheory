@@ -9,15 +9,6 @@ import xarray as xr
 from moc_adjustment_theory import MultiBasinGeometry
 
 
-TRACE_VARIABLES = {
-    "atlantic_west": "x_wA",
-    "atlantic_east": "x_eA",
-    "indian_west": "x_wI",
-    "indian_east": "x_eI",
-    "pacific_west": "x_wP",
-    "pacific_east": "x_eP",
-}
-
 REGIONS = {
     "atlantic_north": {
         "west": "atlantic_west",
@@ -70,26 +61,41 @@ def in_memory_isobaths() -> xr.Dataset:
         data[(latitude >= south) & (latitude <= north)] = value
         return "latitude", data
 
-    return xr.Dataset(
+    dataset = xr.Dataset(
         {
-            "x_wA": trace(-150.0, -56.0, 65.0),
-            "x_eA": trace(-80.0, -35.0, 65.0),
-            "x_wI": trace(-30.0, -35.0, 30.0),
-            "x_eI": trace(30.0, -44.0, 30.0),
-            "x_wP": trace(80.0, -44.0, 60.0),
-            "x_eP": trace(150.0, -56.0, 60.0),
+            "atlantic_west": trace(-150.0, -56.0, 65.0),
+            "atlantic_east": trace(-80.0, -35.0, 65.0),
+            "indian_west": trace(-30.0, -35.0, 30.0),
+            "indian_east": trace(30.0, -44.0, 30.0),
+            "pacific_west": trace(80.0, -44.0, 60.0),
+            "pacific_east": trace(150.0, -56.0, 60.0),
         },
         coords={"latitude": latitude},
         attrs={"isobath_depth_m": 1000.0},
     )
+    regions = list(REGIONS)
+    dataset = dataset.assign_coords(region=regions)
+    dataset["region_west_trace"] = (
+        "region",
+        [str(REGIONS[key]["west"]) for key in regions],
+    )
+    dataset["region_east_trace"] = (
+        "region",
+        [str(REGIONS[key]["east"]) for key in regions],
+    )
+    dataset["region_south"] = (
+        "region",
+        [float(REGIONS[key]["south"]) for key in regions],
+    )
+    dataset["region_north"] = (
+        "region",
+        [float(REGIONS[key]["north"]) for key in regions],
+    )
+    return dataset
 
 
 def test_compact_dataset_builds_labelled_geometry() -> None:
-    geometry = MultiBasinGeometry.from_isobath_dataset(
-        in_memory_isobaths(),
-        trace_variables=TRACE_VARIABLES,
-        region_definitions=REGIONS,
-    )
+    geometry = MultiBasinGeometry.from_isobath_dataset(in_memory_isobaths())
 
     assert geometry.H == 1000.0
     assert geometry.dataset.sizes["trace"] == 6
@@ -114,11 +120,7 @@ def test_tracked_notebook_products_load(
     H: float, expected: tuple[float, float]
 ) -> None:
     with xr.open_dataset(tracked_path(int(H))) as dataset:
-        geometry = MultiBasinGeometry.from_isobath_dataset(
-            dataset,
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=REGIONS,
-        )
+        geometry = MultiBasinGeometry.from_isobath_dataset(dataset)
 
     equator = geometry.dataset.latitude.sel(latitude=0.0, method="nearest")
     assert float(
@@ -130,71 +132,54 @@ def test_tracked_notebook_products_load(
     assert geometry.H == H
 
 
-def test_every_region_limit_must_be_explicit() -> None:
-    regions = {key: dict(value) for key, value in REGIONS.items()}
-    regions["indian_north"].pop("north")
-    with pytest.raises(ValueError, match="explicit north"):
-        MultiBasinGeometry.from_isobath_dataset(
-            in_memory_isobaths(),
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=regions,
-        )
+def test_region_metadata_must_be_complete() -> None:
+    dataset = in_memory_isobaths().drop_vars("region_north")
+    with pytest.raises(ValueError, match="incomplete region metadata"):
+        MultiBasinGeometry.from_isobath_dataset(dataset)
 
 
 def test_fixed_region_stitching_is_validated() -> None:
-    regions = {key: dict(value) for key, value in REGIONS.items()}
-    regions["pacific_north"]["south"] = -43.0
+    dataset = in_memory_isobaths()
+    dataset["region_south"].loc[{"region": "pacific_north"}] = -43.0
     with pytest.raises(ValueError, match="Pacific gateway"):
-        MultiBasinGeometry.from_isobath_dataset(
-            in_memory_isobaths(),
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=regions,
-        )
+        MultiBasinGeometry.from_isobath_dataset(dataset)
 
 
 def test_six_boundary_roles_must_be_distinct() -> None:
-    trace_variables = dict(TRACE_VARIABLES)
-    trace_variables.pop("indian_east")
-    regions = {key: dict(value) for key, value in REGIONS.items()}
-    regions["indian_north"]["east"] = "atlantic_east"
-    regions["atlantic_indian_transition"]["east"] = "atlantic_east"
+    dataset = in_memory_isobaths()
+    for region in ("indian_north", "atlantic_indian_transition"):
+        dataset["region_east_trace"].loc[{"region": region}] = "atlantic_east"
 
     with pytest.raises(ValueError, match="six distinct"):
-        MultiBasinGeometry.from_isobath_dataset(
-            in_memory_isobaths(),
-            trace_variables=trace_variables,
-            region_definitions=regions,
-        )
+        MultiBasinGeometry.from_isobath_dataset(dataset)
+
+
+def test_canonical_trace_names_are_required() -> None:
+    dataset = in_memory_isobaths().rename({"indian_east": "x_eI"})
+    with pytest.raises(ValueError, match="missing canonical traces"):
+        MultiBasinGeometry.from_isobath_dataset(dataset)
 
 
 def test_isobath_depth_cannot_be_relabelled() -> None:
     with pytest.raises(ValueError, match="conflicts"):
         MultiBasinGeometry.from_isobath_dataset(
             in_memory_isobaths(),
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=REGIONS,
             H=500.0,
         )
 
 
 def test_loader_does_not_extrapolate_missing_gateway() -> None:
-    regions = {key: dict(value) for key, value in REGIONS.items()}
-    regions["atlantic_pacific_transition"]["south"] = -57.0
+    dataset = in_memory_isobaths()
+    dataset["region_south"].loc[
+        {"region": "atlantic_pacific_transition"}
+    ] = -57.0
     with pytest.raises(ValueError, match="western traces do not cover"):
-        MultiBasinGeometry.from_isobath_dataset(
-            in_memory_isobaths(),
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=regions,
-        )
+        MultiBasinGeometry.from_isobath_dataset(dataset)
 
 
 def test_existing_internal_trace_gap_is_not_silently_filled() -> None:
     dataset = in_memory_isobaths()
     gap = (dataset.latitude >= -1.0) & (dataset.latitude <= 1.0)
-    dataset["x_wA"] = dataset.x_wA.where(~gap)
+    dataset["atlantic_west"] = dataset.atlantic_west.where(~gap)
     with pytest.raises(ValueError, match="western traces do not cover"):
-        MultiBasinGeometry.from_isobath_dataset(
-            dataset,
-            trace_variables=TRACE_VARIABLES,
-            region_definitions=REGIONS,
-        )
+        MultiBasinGeometry.from_isobath_dataset(dataset)

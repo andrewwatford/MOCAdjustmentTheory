@@ -17,6 +17,46 @@ REGION_KEYS = (
     "atlantic_pacific_transition",
 )
 
+TRACE_NAMES = (
+    "atlantic_west",
+    "atlantic_east",
+    "indian_west",
+    "indian_east",
+    "pacific_west",
+    "pacific_east",
+)
+
+_REGION_METADATA_VARIABLES = (
+    "region_west_trace",
+    "region_east_trace",
+    "region_south",
+    "region_north",
+)
+
+
+def _embedded_region_definitions(
+    dataset: xr.Dataset,
+) -> dict[str, dict[str, object]] | None:
+    present = [name in dataset for name in _REGION_METADATA_VARIABLES]
+    if not any(present):
+        return None
+    if not all(present) or "region" not in dataset.coords:
+        raise ValueError(
+            "isobath dataset contains incomplete region metadata; expected "
+            "region coordinate plus west/east trace and south/north variables"
+        )
+    if set(map(str, dataset.region.values)) != set(REGION_KEYS):
+        raise ValueError("isobath dataset region metadata must define the five regions")
+    return {
+        region: {
+            "west": str(dataset.region_west_trace.sel(region=region).item()),
+            "east": str(dataset.region_east_trace.sel(region=region).item()),
+            "south": float(dataset.region_south.sel(region=region)),
+            "north": float(dataset.region_north.sel(region=region)),
+        }
+        for region in REGION_KEYS
+    }
+
 
 def _normalise_regions(
     definitions: Mapping[str, Mapping[str, object]],
@@ -218,11 +258,14 @@ class MultiBasinGeometry:
         cls,
         dataset: xr.Dataset,
         *,
-        trace_variables: Mapping[str, str],
-        region_definitions: Mapping[str, Mapping[str, object]],
         H: float | None = None,
     ) -> MultiBasinGeometry:
-        """Load a compact boundary product such as the tracked notebook output."""
+        """Load the canonical geometry product written by the extraction notebook.
+
+        The product must contain the six variables listed in ``TRACE_NAMES`` and
+        the five-region metadata variables.  Their names are the file format:
+        no trace roles or region layouts are inferred at load time.
+        """
 
         if "latitude" not in dataset.coords:
             raise ValueError("isobath dataset requires a latitude coordinate")
@@ -233,15 +276,19 @@ class MultiBasinGeometry:
             raise ValueError("H must be supplied or present as isobath_depth_m")
         if np.isfinite(source_H) and not np.isclose(float(H), source_H):
             raise ValueError("supplied H conflicts with the isobath dataset depth")
-        if len(set(trace_variables.values())) != len(trace_variables):
-            raise ValueError("trace variables must be unique")
-        missing = sorted(set(trace_variables.values()) - set(dataset.data_vars))
+        missing = sorted(set(TRACE_NAMES) - set(dataset.data_vars))
         if missing:
-            raise ValueError(f"isobath dataset is missing variables {missing}")
+            raise ValueError(f"isobath dataset is missing canonical traces {missing}")
+
+        region_definitions = _embedded_region_definitions(dataset)
+        if region_definitions is None:
+            raise ValueError(
+                "isobath dataset does not contain authoritative region metadata"
+            )
 
         arrays = []
-        for trace, variable in trace_variables.items():
-            values = dataset[variable].astype(float)
+        for trace in TRACE_NAMES:
+            values = dataset[trace].astype(float)
             arrays.append(
                 xr.Dataset(
                     {
@@ -254,8 +301,6 @@ class MultiBasinGeometry:
         traces = xr.concat(arrays, dim="trace")
         traces["valid"] = np.isfinite(traces.longitude)
         provenance = {
-            "trace_variables": dict(trace_variables),
-            "region_definitions": region_definitions,
             "source_attrs": dict(dataset.attrs),
         }
         return cls(

@@ -13,46 +13,36 @@ from moc_adjustment_theory import (
 
 REGIONS = {
     "atlantic_north": {
-        "west": "a_west",
-        "east": "a_east",
+        "west": "atlantic_west",
+        "east": "atlantic_east",
         "south": -35.0,
         "north": 55.0,
     },
     "indian_north": {
-        "west": "i_west",
-        "east": "i_east",
+        "west": "indian_west",
+        "east": "indian_east",
         "south": -35.0,
         "north": 25.0,
     },
     "pacific_north": {
-        "west": "p_west",
-        "east": "p_east",
+        "west": "pacific_west",
+        "east": "pacific_east",
         "south": -44.0,
         "north": 60.0,
     },
     "atlantic_indian_transition": {
-        "west": "a_west",
-        "east": "i_east",
+        "west": "atlantic_west",
+        "east": "indian_east",
         "south": -44.0,
         "north": -35.0,
     },
     "atlantic_pacific_transition": {
-        "west": "a_west",
-        "east": "p_east",
+        "west": "atlantic_west",
+        "east": "pacific_east",
         "south": -56.0,
         "north": -44.0,
     },
 }
-
-TRACE_VARIABLES = {
-    "a_west": "x_wA",
-    "a_east": "x_eA",
-    "i_west": "x_wI",
-    "i_east": "x_eI",
-    "p_west": "x_wP",
-    "p_east": "x_eP",
-}
-
 
 def model_geometry() -> MultiBasinGeometry:
     latitude = np.arange(-60.0, 66.0)
@@ -64,21 +54,35 @@ def model_geometry() -> MultiBasinGeometry:
 
     dataset = xr.Dataset(
         {
-            "x_wA": trace(-60.0, -56.0, 65.0),
-            "x_eA": trace(20.0, -35.0, 65.0),
-            "x_wI": trace(30.0, -35.0, 30.0),
-            "x_eI": trace(90.0, -44.0, 30.0),
-            "x_wP": trace(110.0, -44.0, 65.0),
-            "x_eP": trace(280.0, -56.0, 65.0),
+            "atlantic_west": trace(-60.0, -56.0, 65.0),
+            "atlantic_east": trace(20.0, -35.0, 65.0),
+            "indian_west": trace(30.0, -35.0, 30.0),
+            "indian_east": trace(90.0, -44.0, 30.0),
+            "pacific_west": trace(110.0, -44.0, 65.0),
+            "pacific_east": trace(280.0, -56.0, 65.0),
         },
         coords={"latitude": latitude},
         attrs={"isobath_depth_m": 1000.0},
     )
-    return MultiBasinGeometry.from_isobath_dataset(
-        dataset,
-        trace_variables=TRACE_VARIABLES,
-        region_definitions=REGIONS,
+    regions = list(REGIONS)
+    dataset = dataset.assign_coords(region=regions)
+    dataset["region_west_trace"] = (
+        "region",
+        [str(REGIONS[key]["west"]) for key in regions],
     )
+    dataset["region_east_trace"] = (
+        "region",
+        [str(REGIONS[key]["east"]) for key in regions],
+    )
+    dataset["region_south"] = (
+        "region",
+        [float(REGIONS[key]["south"]) for key in regions],
+    )
+    dataset["region_north"] = (
+        "region",
+        [float(REGIONS[key]["north"]) for key in regions],
+    )
+    return MultiBasinGeometry.from_isobath_dataset(dataset)
 
 
 def model_forcing(
