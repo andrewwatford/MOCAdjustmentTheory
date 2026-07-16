@@ -5,6 +5,13 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from .fourier import (
+    FFTNorm,
+    _METADATA_KEY,
+    forward_transform,
+    inverse_transform,
+)
+
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_ROTATION_S = 7.292115e-5
 
@@ -18,7 +25,7 @@ _REGIONS = (
 
 
 class GlobalAdjustmentModel:
-    """Solve the global reduced-gravity adjustment theory in frequency space.
+    """Solve the global reduced-gravity adjustment theory.
 
     Parameters
     ----------
@@ -30,12 +37,13 @@ class GlobalAdjustmentModel:
 
     Notes
     -----
-    ``solve_frequency`` is the frequency-domain kernel. It deliberately does
-    not transform time series; the module-level Fourier transform functions
-    own that convention.
+    `solve` is the complete temporal interface. It uses the module-level
+    Fourier functions around `solve_frequency`, the independently testable
+    frequency-domain kernel.
     """
 
     def __init__(self, isobath_ds: xr.Dataset, g_prime: float):
+        """Validate and retain the active-layer geometry and reduced gravity."""
         required = {name for _, west, east in _REGIONS for name in (west, east)}
         missing = required.difference(isobath_ds.data_vars)
         if missing or "latitude" not in isobath_ds.coords:
@@ -47,6 +55,119 @@ class GlobalAdjustmentModel:
             raise ValueError("g_prime must be positive")
         self.isobath_ds = isobath_ds
         self.g_prime = float(g_prime)
+
+    def solve(
+        self,
+        forcing_ds: xr.Dataset,
+        *,
+        time_dim: str = "time",
+        omega_dim: str = "omega",
+        pad_factor: int = 2,
+        norm: FFTNorm = "backward",
+        require_zero_mean: bool = True,
+        zero_mean_rtol: float = 1e-7,
+        imaginary_rtol: float = 1e-12,
+        sample_spacing_seconds: float | None = None,
+    ) -> xr.Dataset:
+        """Solve temporal forcing and return temporal model diagnostics.
+
+        The three forcing variables ``M_Ek_x``, ``M_Ek_y`` and ``T_N`` are
+        transformed with one explicit contract, passed through
+        `solve_frequency`, and inverse transformed onto their original
+        time coordinate. ``sample_spacing_seconds`` supplies a physical sample
+        interval when increasing calendar labels are not uniformly separated;
+        monthly forcing in this project uses ``365.25 / 12`` days. All other
+        transform arguments are forwarded unchanged to the paired Fourier
+        functions.
+
+        Parameters
+        ----------
+        forcing_ds
+            Temporal Ekman transports and northern transport on a shared time
+            coordinate.
+        time_dim, omega_dim
+            Temporal and angular-frequency dimension names.
+        pad_factor, norm
+            Causal right-padding factor and NumPy FFT normalization.
+        require_zero_mean, zero_mean_rtol
+            Whether to enforce forcing anomalies and the field-scale relative
+            tolerance used before projecting accepted DC residuals to zero.
+        imaginary_rtol
+            Relative tolerance for spectral components that must be real.
+        sample_spacing_seconds
+            Optional physical interval for nonuniform calendar labels. With
+            ``None``, a uniform interval is inferred from the time coordinate.
+
+        Returns
+        -------
+        xarray.Dataset
+            ``h_e``, ``h_b``, ``h_w``, ``T``, ``T_g`` and ``T_Ek`` on the
+            original time coordinate and the five-region model geometry.
+        """
+        required = ("M_Ek_x", "M_Ek_y", "T_N")
+        missing = set(required).difference(forcing_ds.data_vars)
+        if missing:
+            raise ValueError(
+                f"forcing dataset is missing: {', '.join(sorted(missing))}"
+            )
+
+        transform_options = {
+            "time_dim": time_dim,
+            "omega_dim": omega_dim,
+            "pad_factor": pad_factor,
+            "norm": norm,
+            "sample_spacing_seconds": sample_spacing_seconds,
+        }
+        forcing_hat = xr.Dataset(
+            {
+                name: forward_transform(
+                    forcing_ds[name],
+                    require_zero_mean=require_zero_mean,
+                    zero_mean_rtol=zero_mean_rtol,
+                    **transform_options,
+                )
+                for name in required
+            }
+        )
+
+        kernel_forcing = (
+            forcing_hat
+            if omega_dim == "omega"
+            else forcing_hat.rename({omega_dim: "omega"})
+        )
+        solution_hat = self.solve_frequency(kernel_forcing)
+        if omega_dim != "omega":
+            solution_hat = solution_hat.rename({"omega": omega_dim})
+
+        metadata = forcing_hat["T_N"].attrs[_METADATA_KEY]
+        solution = {}
+        for name, spectrum in solution_hat.data_vars.items():
+            spectrum = spectrum.copy(deep=False)
+            spectrum.attrs = dict(spectrum.attrs)
+            spectrum.attrs[_METADATA_KEY] = metadata
+            masked = spectrum.isnull().all(omega_dim)
+            partially_missing = spectrum.isnull().any(omega_dim) & ~masked
+            if bool(partially_missing.any()):
+                raise ValueError(
+                    f"{name} has missing values within an active spectrum"
+                )
+            restored = inverse_transform(
+                spectrum.fillna(0.0),
+                imaginary_rtol=imaginary_rtol,
+                **transform_options,
+            )
+            solution[name] = restored.where(~masked)
+
+        result = xr.Dataset(solution)
+        result.attrs.update(
+            {
+                "g_prime_m_s-2": self.g_prime,
+                "isobath_depth_m": float(
+                    self.isobath_ds.attrs["isobath_depth_m"]
+                ),
+            }
+        )
+        return result
 
     def solve_frequency(self, forcing_hat: xr.Dataset) -> xr.Dataset:
         """Solve for spectral thickness and transport anomalies.
@@ -191,6 +312,7 @@ class GlobalAdjustmentModel:
 
     @staticmethod
     def _forcing_arrays(forcing_hat: xr.Dataset):
+        """Validate spectral forcing and return consistently ordered arrays."""
         missing = {"M_Ek_x", "M_Ek_y", "T_N"}.difference(forcing_hat.data_vars)
         missing_dims = {"omega", "latitude", "longitude"}.difference(forcing_hat.coords)
         if missing or missing_dims:
@@ -216,6 +338,7 @@ class GlobalAdjustmentModel:
         return omega, latitude, longitude, mx, my, t_n
 
     def _geometry(self, latitude: np.ndarray):
+        """Interpolate boundaries and infer the five contiguous region supports."""
         source_lat = np.asarray(self.isobath_ds.latitude.values, dtype=float)
         support = {}
         boundaries = {}
@@ -238,12 +361,14 @@ class GlobalAdjustmentModel:
             (y_s, y_p),
         )
         def ceiling(value):
+            """Return the first forcing latitude at or north of a boundary."""
             candidates = latitude[latitude >= value]
             if candidates.size == 0:
                 raise ValueError("forcing latitude does not cover the active domain")
             return candidates[0]
 
         def floor(value):
+            """Return the last forcing latitude at or south of a boundary."""
             candidates = latitude[latitude <= value]
             if candidates.size == 0:
                 raise ValueError("forcing latitude does not cover the active domain")
@@ -276,6 +401,7 @@ class GlobalAdjustmentModel:
 
     @staticmethod
     def _zonal_terms(w, my, longitude, latitude, x_w, x_e, omega, c):
+        """Integrate regional forcing, thickness source, and Ekman transport."""
         n_omega, n_latitude, _ = w.shape
         q_f = np.empty((n_omega, n_latitude), dtype=complex)
         source = np.empty_like(q_f)
@@ -299,6 +425,7 @@ class GlobalAdjustmentModel:
 
     @staticmethod
     def _solve_boundaries(omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p):
+        """Solve the three-basin boundary-thickness system at each frequency."""
         h = np.zeros((omega.size, 3), dtype=complex)
         rhs = np.column_stack(
             (

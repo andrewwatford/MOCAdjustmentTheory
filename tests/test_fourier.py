@@ -16,8 +16,8 @@ def test_forward_uses_rfft_right_padding_and_angular_frequency() -> None:
 
     spectrum = forward_transform(data)
 
-    np.testing.assert_allclose(spectrum, np.fft.rfft(data.values, n=8))
-    expected_omega = 2 * np.pi * np.fft.rfftfreq(8, d=6 * 60 * 60)
+    np.testing.assert_allclose(spectrum, np.fft.rfft(data.values, n=9))
+    expected_omega = 2 * np.pi * np.fft.rfftfreq(9, d=6 * 60 * 60)
     np.testing.assert_allclose(spectrum.omega, expected_omega)
     assert spectrum.omega.attrs["units"] == "rad s-1"
 
@@ -55,6 +55,7 @@ def test_forward_rejects_nonzero_mean_by_default() -> None:
 
 
 def test_forward_accepts_float32_residual_means_against_field_scale() -> None:
+    """Accepted float32 demeaning residuals are projected to exact zero DC."""
     data = xr.DataArray(
         np.array(
             [[100.0, -100.0, 100.0, -100.0], [1e-3, -1e-3, 1e-3, -0.999e-3]],
@@ -67,6 +68,7 @@ def test_forward_accepts_float32_residual_means_against_field_scale() -> None:
     spectrum = forward_transform(data)
 
     assert spectrum.sizes["omega"] == 5
+    np.testing.assert_array_equal(spectrum.isel(omega=0), 0.0)
 
 
 def test_inverse_accepts_real_nonzero_dc() -> None:
@@ -74,6 +76,23 @@ def test_inverse_accepts_real_nonzero_dc() -> None:
 
     spectrum = forward_transform(data, require_zero_mean=False)
     restored = inverse_transform(spectrum)
+
+    xr.testing.assert_allclose(restored, data)
+
+
+def test_explicit_sample_spacing_preserves_calendar_labels() -> None:
+    """A physical interval can override irregular monthly label spacing."""
+    time = np.array(
+        ["2000-01-01", "2000-02-01", "2000-03-01", "2000-04-01"],
+        dtype="datetime64[D]",
+    )
+    data = xr.DataArray([0.0, 1.0, 0.0, -1.0], dims="time", coords={"time": time})
+    spacing = 365.25 / 12 * 24 * 60 * 60
+
+    spectrum = forward_transform(data, sample_spacing_seconds=spacing)
+    restored = inverse_transform(
+        spectrum, sample_spacing_seconds=spacing
+    )
 
     xr.testing.assert_allclose(restored, data)
 
