@@ -49,3 +49,22 @@ transport_26n = output.transport_at("atlantic_north", 26.5)
 
 All transforms back to time use the padding, crop, sampling interval, and
 frequency coordinate owned by the forcing object.
+
+## Reference validation
+
+An opt-in integration test reconstructs the established 2004–2024
+ERA5/SCOTIA Atlantic calculation through this API. It supplies SCOTIA as the
+total northern transport and derives the southern transport from the same
+user-prepared \(M_{\mathrm{Ek}}\) field. Correlations with the legacy result
+exceed 0.99 for \(h_e\), \(h_w\), geostrophic transport, and total transport;
+the Ekman-transport correlation exceeds 0.9999.
+
+```bash
+MOC_REFERENCE_ROOT=/path/to/atlantic_adjustment python -m pytest -m integration
+```
+
+The legacy \(h_b\) comparison remains an explicit expected failure: its
+notebook differentiates three independently tapered Atlantic sectors, which
+creates a gateway curl sheet that cannot be reproduced by one continuous
+vector-transport field. The test records this difference instead of weakening
+the acceptance tolerance.

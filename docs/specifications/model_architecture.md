@@ -31,10 +31,6 @@ GlobalAdjustmentModel
 GlobalAdjustmentOutput
 ```
 
-`Basin` may be retained as an internal or convenience value object if it makes
-geometry construction clearer. Users do not need to instantiate one in order
-to run the model.
-
 All labelled arrays should use `xarray`. Large Ekman-transport fields and geometry masks
 may be backed by `dask`; the final \(3\times3\) solves are small dense linear
 algebra and do not need distributed machinery.
@@ -80,8 +76,8 @@ h_I : regions 2 and 4
 h_P : regions 3 and 5
 ```
 
-The geometry owns that sharing map so downstream results can still be exposed
-on all five regions.
+The model owns this fixed sharing map so downstream results can still be
+exposed on all five regions.
 
 ## 4. One forcing object
 
@@ -334,8 +330,8 @@ T_g=\frac{g'H}{f}(h_e-h_w),
 h_w=h_e-\frac{fT_g}{g'H}.
 \]
 
-The output also carries the frequency-domain \(h_A,h_I,h_P\), transform
-metadata, condition numbers, and the optional per-region compatibility
+The output also carries the frequency-domain \(h_A,h_I,h_P\), forcing-owned
+transform metadata, condition numbers, and the optional per-region compatibility
 residual. Spectral arrays are retained for reproducibility and decomposition;
 they are not a separate public result type.
 

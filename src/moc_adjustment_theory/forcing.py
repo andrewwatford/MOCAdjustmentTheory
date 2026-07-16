@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import dask.array as dsa
+from dask import compute
 import numpy as np
 import xarray as xr
 from scipy.fft import next_fast_len
@@ -80,12 +81,6 @@ def _validate_grid(M_ek_x: xr.DataArray, M_ek_y: xr.DataArray) -> None:
 def _sample_interval_seconds(
     time: xr.DataArray, supplied: float | None
 ) -> float:
-    if supplied is not None:
-        interval = float(supplied)
-        if not np.isfinite(interval) or interval <= 0:
-            raise ValueError("sample_interval_seconds must be positive and finite")
-        return interval
-
     values = np.asarray(time)
     if np.issubdtype(values.dtype, np.datetime64):
         difference = np.diff(values.astype("datetime64[ns]")).astype("timedelta64[ns]")
@@ -99,8 +94,15 @@ def _sample_interval_seconds(
         seconds = np.diff(values.astype(float))
     if seconds.size == 0 or not np.all(np.isfinite(seconds)):
         raise ValueError("forcing requires at least two finite time samples")
+    if np.any(seconds <= 0):
+        raise ValueError("time must be unique and strictly increasing")
+    if supplied is not None:
+        interval = float(supplied)
+        if not np.isfinite(interval) or interval <= 0:
+            raise ValueError("sample_interval_seconds must be positive and finite")
+        return interval
     interval = float(np.median(seconds))
-    if interval <= 0 or not np.allclose(seconds, interval, rtol=1e-8, atol=1e-6):
+    if not np.allclose(seconds, interval, rtol=1e-8, atol=1e-6):
         raise ValueError(
             "time must be uniformly sampled; pass sample_interval_seconds for "
             "a calendar-month record"
@@ -177,8 +179,11 @@ class GlobalForcing:
                 "southern_transport": southern_transport,
             }
         )
-        for name, array in time_domain.data_vars.items():
-            if bool(array.isnull().any().compute()):
+        missing = compute(
+            *(array.isnull().any() for array in time_domain.data_vars.values())
+        )
+        for name, contains_missing in zip(time_domain.data_vars, missing, strict=True):
+            if bool(contains_missing):
                 raise ValueError(f"forcing input {name!r} cannot contain missing values")
         if remove_time_mean:
             time_domain = time_domain - time_domain.mean("time")

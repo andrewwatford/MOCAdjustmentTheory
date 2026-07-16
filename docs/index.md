@@ -1,28 +1,46 @@
 # MOC Adjustment Theory
 
-This is the initial documentation scaffold for `moc-adjustment-theory`, a
-planned modular package for reduced-gravity adjustment in connected ocean
-basins.
-
-The scientific interfaces are intentionally **not implemented yet**. They
-will be designed in documentation-first pull requests before numerical code is
-added.
-
-## Installation smoke test
-
-After installing from source or in editable mode:
+`moc-adjustment-theory` implements the fixed five-region reduced-gravity model
+of global overturning adjustment. Its public workflow has four objects and one
+solve:
 
 ```python
-from moc_adjustment_theory import hello_world
+from moc_adjustment_theory import (
+    GlobalAdjustmentModel,
+    GlobalForcing,
+    MultiBasinGeometry,
+)
 
-hello_world()
+geometry = MultiBasinGeometry.from_isobath_dataset(
+    isobaths,
+    trace_variables=trace_variables,
+    region_definitions=region_definitions,
+)
+
+forcing = GlobalForcing.from_time_series(
+    M_ek_x=M_ek.x,
+    M_ek_y=M_ek.y,
+    northern_transport=northern_transport,
+    southern_transport=southern_transport,
+)
+
+output = GlobalAdjustmentModel(geometry, forcing, g_prime=0.02).solve()
 ```
 
-The temporary result is `"Hello, world!"`.
+The supplied Ekman vector transport is the scientific package boundary. The
+package derives Ekman pumping, all section Ekman transports, the regional
+forcing terms, and the complete time-dependent solution. Conversion from wind
+stress—including reference density, equatorial regularization, and coastal
+tapering—remains an upstream user choice.
 
-The same check is available from a shell:
+Start with [Geometry](geometry.md) for the compact isobath interface, then see
+the [Core API](core_api.md) and focused
+[model specification](specifications/model_architecture.md).
 
-```console
-$ python -m moc_adjustment_theory
-Hello, MOC adjustment theory!
+## Local development
+
+```bash
+python -m pip install -e '.[dev]'
+python -m pytest
+python -m mkdocs serve
 ```

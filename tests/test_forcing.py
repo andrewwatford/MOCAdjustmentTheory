@@ -127,6 +127,19 @@ def test_calendar_month_sampling_can_be_declared_explicitly() -> None:
     assert forcing.sample_interval_seconds == pytest.approx(365.25 * 86400.0 / 12.0)
 
 
+def test_explicit_interval_still_requires_increasing_unique_time() -> None:
+    inputs = forcing_inputs()
+    shuffled = np.asarray(inputs["M_ek_x"].time).copy()
+    shuffled[[2, 3]] = shuffled[[3, 2]]
+    for name in inputs:
+        inputs[name] = inputs[name].assign_coords(time=shuffled)
+    with pytest.raises(ValueError, match="unique and strictly increasing"):
+        GlobalForcing.from_time_series(
+            **inputs,
+            sample_interval_seconds=86_400.0,
+        )
+
+
 def test_missing_or_inconsistent_forcing_fails_early() -> None:
     inputs = forcing_inputs()
     inputs["M_ek_x"] = inputs["M_ek_x"].where(

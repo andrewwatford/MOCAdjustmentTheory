@@ -439,6 +439,10 @@ class GlobalAdjustmentModel:
                 ),
             }
         )
+        spectral.attrs.update(self.forcing.spectral.attrs)
+        spectral.attrs["time_mean_removed"] = bool(
+            self.forcing.time_domain.attrs["time_mean_removed"]
+        )
         for name in ("h_e", "h_b", "h_w"):
             spectral[name].attrs["units"] = "m"
         for name in (

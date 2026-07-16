@@ -156,6 +156,9 @@ def test_zero_ekman_solution_closes_budgets_and_returns_every_field() -> None:
     assert float(abs(output.transport_ekman).max()) < 1e-12
     assert float(abs(output.spectral.compatibility_residual).max()) < 1e-12
     assert np.isfinite(output.spectral.condition_number.isel(omega=slice(1, None))).all()
+    assert output.spectral.attrs["n_fft"] == 64
+    assert output.dataset.attrs["padding_mode"] == "reflect"
+    assert output.dataset.attrs["time_mean_removed"] is True
     np.testing.assert_allclose(
         output.h_e.sel(region="indian_north"),
         output.h_e.sel(region="atlantic_indian_transition"),
