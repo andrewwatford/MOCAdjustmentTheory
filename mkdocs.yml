@@ -23,6 +23,6 @@ extra_javascript:
 
 nav:
   - Home: index.md
-  - Model architecture: specifications/model_architecture.md
+  - Specifications: specifications.md
 
 strict: true
