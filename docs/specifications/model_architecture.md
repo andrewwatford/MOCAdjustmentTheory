@@ -198,17 +198,17 @@ with any low-latitude cap on \(c\) recorded as model metadata. Define
 
 \[
 P_j(\omega,x,y)
-=1-\exp\!\left[
+=\exp\!\left[
 -\frac{i\omega\,[x-x_b^{(j)}(y)]}{c(y)}
-\right].
+\right]-1.
 \]
 
-This \(P_j\) is the regional budget kernel, not the characteristic phase
-factor itself. The regional forcing and storage coefficient are
+This \(P_j\) is the regional budget kernel, with its sign chosen to absorb
+the leading signs in the regional forcing and storage coefficient:
 
 \[
 F_j(\omega)=
--\int_{y_{S,j}}^{y_{N,j}}
+\int_{y_{S,j}}^{y_{N,j}}
 \int_{x_b^{(j)}(y)}^{x_e^{(j)}(y)}
 P_j(\omega,x,y)\,
 \widehat w_{\mathrm{Ek},j}(x,y,\omega)\,dx\,dy,
@@ -216,7 +216,7 @@ P_j(\omega,x,y)\,
 
 \[
 r_j(\omega)=
--\int_{y_{S,j}}^{y_{N,j}}
+\int_{y_{S,j}}^{y_{N,j}}
 c(y)P_j\!\left(\omega,x_e^{(j)}(y),y\right)\,dy.
 \]
 
