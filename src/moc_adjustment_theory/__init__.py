@@ -1,6 +1,7 @@
 """Modular theory of meridional-overturning-circulation adjustment."""
 
-from .fourier import forward_transform, inverse_transform, GlobalAdjustmentModel
+from .fourier import forward_transform, inverse_transform
+from .model import GlobalAdjustmentModel
 from .hello import hello_world
 
 __all__ = ["forward_transform", "hello_world", "inverse_transform", "GlobalAdjustmentModel"]
