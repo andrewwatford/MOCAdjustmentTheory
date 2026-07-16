@@ -334,7 +334,10 @@ they are not a separate public result type.
 ## 8. Minimal interface
 
 ```python
-geometry = MultiBasinGeometry.from_bathymetry(bathymetry)
+geometry = MultiBasinGeometry.from_bathymetry(
+  bathymetry.
+  H=1_000.0
+)
 
 forcing = GlobalForcing.from_time_series(
     wind_stress=wind_stress_anomaly,
@@ -346,7 +349,6 @@ model = GlobalAdjustmentModel(
     geometry=geometry,
     forcing=forcing,
     g_prime=0.02,
-    H=1_000.0,
     rho0=1_027.0,
 )
 
