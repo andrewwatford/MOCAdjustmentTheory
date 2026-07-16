@@ -20,7 +20,10 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
 ]
-dependencies = []
+dependencies = [
+  "numpy>=1.26",
+  "xarray>=2024.1",
+]
 
 [project.optional-dependencies]
 test = [

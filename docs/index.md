@@ -11,13 +11,13 @@ The user workflow is:
    typically a prescribed isobath.
 2. Construct an `xarray.Dataset` containing an Ekman forcing field and a time
    series of northern-boundary forcing.
-3. Define a `FourierTransformer` for the solve.
-4. Pass those objects and the reduced gravity $g'$ to `GlobalAdjustmentModel`.
-5. Call `solve()` to obtain the results as an `xarray.Dataset`.
+3. Pass those datasets and the reduced gravity $g'$ to `GlobalAdjustmentModel`.
+4. Call `solve()` to obtain the results as an `xarray.Dataset`.
 
 Users provide the forcing and isobath datasets, and the model returns another
-dataset. The only package-specific public objects are therefore
-`GlobalAdjustmentModel` and `FourierTransformer`.
+dataset. The Fourier interface is the stateless `forward_transform` and
+`inverse_transform` function pair. `GlobalAdjustmentModel` is the intended
+model interface; its integration with these functions is not yet implemented.
 
 ## Theory
 
@@ -149,7 +149,6 @@ The intended interface is:
 model = GlobalAdjustmentModel(
     isobath_ds=isobath_ds,
     forcing_ds=forcing_ds,
-    fourier_transformer=ft,
     g_prime=g_prime,  # m s^-2
 )
 solution_ds = model.solve()
@@ -188,10 +187,33 @@ wind-driven and is obtained by integrating $M_{\mathrm{Ek},y}$ across the
 southern latitude. Ekman upwelling is the divergence of the Ekman transport,
 $w_{\mathrm{Ek}}=\nabla\mathbin{\cdot}\mathbf{M}_{\mathrm{Ek}}$.
 
-### Fourier transformer
+### Fourier transforms
 
-`FourierTransformer` acts on data arrays and applies forward and inverse
-Fourier transforms with a consistent convention, including padding.
+`forward_transform` and `inverse_transform` apply one stateless Fourier
+contract to `xarray.DataArray` objects. The forward transform uses NumPy's real
+FFT convention, angular frequency in rad/s, and causal right-zero-padding to
+twice the input length. It requires a strictly increasing, uniformly spaced
+`datetime64` time coordinate and rejects non-finite values.
+
+The numerical contract is explicit in the function arguments. Its defaults
+are `time_dim="time"`, `omega_dim="omega"`, `pad_factor=2`,
+`norm="backward"`, `require_zero_mean=True`, and
+`zero_mean_rtol=1e-7`. The zero-mean tolerance is relative to the field-wide
+maximum absolute amplitude; pass `require_zero_mean=False` to retain a real
+nonzero DC component. The inverse additionally exposes
+`imaginary_rtol=1e-12`, restores the original time coordinate, removes the
+right padding, and rejects DC or Nyquist components inconsistent with a real
+time series.
+
+```python
+from moc_adjustment_theory import forward_transform, inverse_transform
+
+forcing_omega = forward_transform(forcing)
+forcing_time = inverse_transform(forcing_omega)
+```
+
+The planned `GlobalAdjustmentModel.solve()` integration will expose and pass
+the same contract arguments; that integration is not implemented yet.
 
 ### Output dataset
 
