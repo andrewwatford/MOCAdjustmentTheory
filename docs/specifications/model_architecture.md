@@ -60,11 +60,11 @@ The five regions are:
 The theory stops at \(y_S\), near the southern tip of South America. It does
 not model the Southern Ocean as an additional connected basin.
 
-All geographic choices used to construct this object are explicit arguments:
-basin longitude windows and seeds, every northern and southern region bound,
-closure paths, and ignored features. The bathymetry extractor contains no
-named-ocean coordinates and does not infer scientific closure latitudes from
-the connected-component result.
+The package loads a compact six-trace isobath product. Variable mappings and
+every northern and southern region bound are explicit arguments. Producing
+that product from raw bathymetry—including basin windows, seeds, closures, and
+feature cleanup—remains an auxiliary notebook workflow rather than duplicated
+package functionality.
 
 The geometry records boundary curves, latitude coordinates, and the locations
 \(x_e(y)\) and \(x_b(y)\). Here \(x_b\) is just outside the western
@@ -335,14 +335,10 @@ they are not a separate public result type.
 ## 8. Minimal interface
 
 ```python
-geometry = MultiBasinGeometry.from_bathymetry(
-    elevation,
-    H=1_000.0,
-    basin_definitions=basin_definitions,
+geometry = MultiBasinGeometry.from_isobath_dataset(
+    isobaths,
+    trace_variables=trace_variables,
     region_definitions=region_definitions,
-    closures=closure_paths,
-    ignored_features=ignored_features,
-    extraction_options=extraction_options,
 )
 
 forcing = GlobalForcing.from_time_series(

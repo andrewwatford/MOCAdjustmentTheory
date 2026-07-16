@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 
 import numpy as np
 import xarray as xr
-
-from ._bathymetry import extract_traces
-
 
 REGION_KEYS = (
     "atlantic_north",
@@ -213,75 +210,6 @@ class MultiBasinGeometry:
             raise ValueError("eastern traces do not cover every region latitude")
         if bool(((east - west).where(in_region) <= 0).any()):
             raise ValueError("every eastern boundary must lie east of its west")
-
-    @classmethod
-    def from_bathymetry(
-        cls,
-        elevation: xr.DataArray,
-        *,
-        H: float,
-        basin_definitions: Mapping[str, Mapping[str, object]],
-        region_definitions: Mapping[str, Mapping[str, object]],
-        closures: Sequence[Mapping[str, object]] = (),
-        ignored_features: Sequence[Mapping[str, object]] = (),
-        extraction_options: Mapping[str, object] | None = None,
-    ) -> MultiBasinGeometry:
-        """Extract geometry with all geographic choices supplied explicitly."""
-
-        H = float(H)
-        if not np.isfinite(H) or H <= 0:
-            raise ValueError("H must be positive and finite")
-        regions = _normalise_regions(region_definitions)
-        basin_names = set(map(str, basin_definitions))
-        referenced_traces = {
-            str(definition[side])
-            for definition in regions.values()
-            for side in ("west", "east")
-        }
-        expected_traces = {
-            f"{basin}_{side}" for basin in basin_names for side in ("west", "east")
-        }
-        if referenced_traces != expected_traces:
-            raise ValueError(
-                "regions must reference exactly west/east traces for every basin"
-            )
-
-        support: dict[str, tuple[float, float]] = {}
-        for trace in referenced_traces:
-            uses = [
-                definition
-                for definition in regions.values()
-                if trace in {definition["west"], definition["east"]}
-            ]
-            south = min(float(use["south"]) for use in uses)
-            north = max(float(use["north"]) for use in uses)
-            support[trace] = (south, north)
-
-        options = dict(extraction_options or {})
-        traces = extract_traces(
-            elevation,
-            H=H,
-            basin_definitions=basin_definitions,
-            trace_support=support,
-            closures=closures,
-            ignored_features=ignored_features,
-            extraction_options=options,
-        )
-        provenance = {
-            "basin_definitions": basin_definitions,
-            "region_definitions": region_definitions,
-            "closures": closures,
-            "ignored_features": ignored_features,
-            "extraction_options": options,
-        }
-        return cls(
-            _assemble_dataset(
-                traces,
-                H=H,
-                region_definitions=region_definitions,
-                provenance=provenance,
-            )
-        )
 
     @classmethod
     def from_isobath_dataset(

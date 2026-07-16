@@ -18,8 +18,8 @@ python -m pytest
 python -m mkdocs build --strict
 ```
 
-Geographic choices are explicit inputs to
-`MultiBasinGeometry.from_bathymetry`; the extractor contains no hidden basin
-windows, gateway latitudes, or closure paths. See the
+Geometry is loaded from a compact six-trace isobath dataset with explicit
+variable mappings and region bounds. Bathymetry extraction remains an
+auxiliary notebook workflow rather than package functionality. See the
 [documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/) for the
 architecture and geometry configuration contract.
