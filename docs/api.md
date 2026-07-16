@@ -1,6 +1,11 @@
 # API reference
 
-::: moc_adjustment_theory
+## Fourier transforms
+
+::: moc_adjustment_theory.forward_transform
     options:
       show_root_heading: true
-      members_order: source
+
+::: moc_adjustment_theory.inverse_transform
+    options:
+      show_root_heading: true
