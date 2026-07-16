@@ -8,7 +8,7 @@ theory and return the complete time-dependent solution.
 
 The user workflow is deliberately short:
 
-1. construct a `MultiBasinTopology`;
+1. construct a `MultiBasinGeometry`;
 2. construct one `GlobalForcing` from domain-wide wind-stress anomalies and
    northern and southern boundary transports;
 3. give both objects to `GlobalAdjustmentModel` and solve the
@@ -25,23 +25,23 @@ selections from the global output, not a second solver.
 The intended public surface is:
 
 ```python
-MultiBasinTopology
+MultiBasinGeometry
 GlobalForcing
 GlobalAdjustmentModel
 GlobalAdjustmentOutput
 ```
 
 `Basin` may be retained as an internal or convenience value object if it makes
-topology construction clearer. Users do not need to instantiate one in order
+geometry construction clearer. Users do not need to instantiate one in order
 to run the model.
 
 All labelled arrays should use `xarray`. Large wind fields and geometry masks
 may be backed by `dask`; the final \(3\times3\) solves are small dense linear
 algebra and do not need distributed machinery.
 
-## 3. Multi-basin topology
+## 3. Multi-basin geometry
 
-`MultiBasinTopology` is the single description of the domain. It contains both
+`MultiBasinGeometry` is the single description of the domain. It contains both
 the geometric information required for integrations and the directed,
 ordered topology required for the budgets.
 
@@ -66,7 +66,7 @@ region 4 -> [region 2, region 1]
 ```
 
 Changing child order changes the algebra and must therefore be explicit and
-validated. The topology also records boundary curves, latitude coordinates,
+validated. The geometry also records boundary curves, latitude coordinates,
 region masks, integration weights, and the locations \(x_e(y)\) and \(x_b(y)\).
 Here \(x_b\) is just outside the western boundary-current region; it is not the
 western coastline.
@@ -79,7 +79,7 @@ h_I : regions 2 and 4
 h_P : regions 3 and 5
 ```
 
-The topology owns that sharing map so downstream results can still be exposed
+The geometry owns that sharing map so downstream results can still be exposed
 on all five regions.
 
 ## 4. One forcing object
@@ -131,7 +131,7 @@ The Ekman transport and pumping are then
 w_{\mathrm{Ek}}=\nabla\!\cdot\mathbf M_{\mathrm{Ek}}.
 \]
 
-The model samples this one derived field against the topology to obtain every
+The model samples this one derived field against the geometry to obtain every
 regional pumping integral and every Ekman section transport. Dask-backed
 differentiation and reductions may be used, but the resulting regional arrays
 should be small and eagerly validated before the solve.
@@ -162,7 +162,10 @@ transform; it must not construct a competing frequency grid.
 The default convention is:
 
 - a common, uniformly sampled time coordinate;
-- real-input `rfft` and non-negative angular frequency
+- NumPy's real-input `rfft` convention,
+  \(\widehat a(\omega)=\int a(t)e^{-i\omega t}\,dt\), so a delay contributes
+  \(e^{-i\omega\tau}\);
+- non-negative angular frequency
   \(\omega=2\pi\,\mathrm{rfftfreq}(n_{\rm fft},\Delta t)\);
 - zero padding sufficient to isolate the retained interval from circular
   wraparound (normally at least \(n-1\) samples on each side);
@@ -176,7 +179,7 @@ error; it may not silently reinterpret it.
 
 ## 6. GlobalAdjustmentModel
 
-`GlobalAdjustmentModel` ingests one topology, one forcing, and the physical
+`GlobalAdjustmentModel` ingests one geometry, one forcing, and the physical
 parameters. It derives all geometry-dependent forcing terms, assembles the
 fixed global system at every frequency, solves it, reconstructs the complete
 diagnostics, and applies the forcing-owned inverse transform.
@@ -191,26 +194,37 @@ Within a region the eastern-boundary signal obeys
 c(y)=\frac{\beta g'H}{f^2},
 \]
 
-with any low-latitude cap on \(c\) recorded as model metadata. For
+with any low-latitude cap on \(c\) recorded as model metadata. Define
 
 \[
-P(x,y,\omega)=
-\exp\!\left[
--\frac{i\omega\,[x_e(y)-x]}{c(y)}
-\right],
+P_j(\omega,x,y)
+=\exp\!\left[
+\frac{i\omega\,[x_b^{(j)}(y)-x]}{c(y)}
+\right]-1.
 \]
 
-define the regional forcing and storage coefficient
+This \(P_j\) is the regional budget kernel, with its sign chosen to absorb
+the leading signs in the regional forcing and storage coefficient:
 
 \[
 F_j(\omega)=
-\int_{R_j}P(x,y,\omega)\,
-\widehat w_{\mathrm{Ek}}(x,y,\omega)\,dA,
+\int_{y_{S,j}}^{y_{N,j}}
+\int_{x_b^{(j)}(y)}^{x_e^{(j)}(y)}
+P_j(\omega,x,y)\,
+\widehat w_{\mathrm{Ek},j}(x,y,\omega)\,dx\,dy,
 \]
 
 \[
 r_j(\omega)=
-i\omega\int_{R_j}P(x,y,\omega)\,dA.
+\int_{y_{S,j}}^{y_{N,j}}
+c(y)P_j\!\left(\omega,x_e^{(j)}(y),y\right)\,dy.
+\]
+
+These definitions give the thin-western-boundary-current regional budget
+
+\[
+T_{\mathrm{out}}^{(j)}-T_{\mathrm{in}}^{(j)}
+=-F_j+r_jh_e^{(j)}.
 \]
 
 These are implementation details of the global model, not user-supplied
@@ -263,7 +277,7 @@ Every call to `solve()` returns a `GlobalAdjustmentOutput`. It always contains
 time-domain values for all five regions:
 
 - `h_e(time, region)` — eastern-boundary thickness, with shared values repeated
-  according to the topology map;
+  according to the geometry map;
 - `h_b(time, region, latitude)` — thickness at \(x_b(y)\), outside the western
   boundary-current region;
 - `h_w(time, region, latitude)` — western-boundary thickness inferred from the
@@ -279,15 +293,20 @@ The notation is physical: \(h_w\) means western-boundary thickness, not
 westward-propagating thickness.
 
 For a latitude \(y\) inside region \(j\), the characteristic solution used for
-\(h_b\) is
+\(h_b\) is kept distinct from the budget kernel:
 
 \[
-\widehat h_b(y,\omega)=
-P(x_b,y,\omega)\widehat h_e^{(j)}(\omega)
-+\int_{x_b}^{x_e}
+\widehat h(x,y,\omega)
+=\widehat h_e^{(j)}(\omega)
+\exp\!\left[\frac{i\omega[x-x_e(y)]}{c(y)}\right]
++\int_{x_e(y)}^x
 \frac{\widehat w_{\mathrm{Ek}}(x',y,\omega)}{c(y)}
-\exp\!\left[-\frac{i\omega(x'-x_b)}{c(y)}\right]dx'.
+\exp\!\left[\frac{i\omega(x-x')}{c(y)}\right]dx',
 \]
+
+with \(\widehat h_b(y,\omega)
+=\widehat h(x_b(y),y,\omega)\). The symbol \(P_j\) above must not be
+substituted for the exponential propagation factor in this solution.
 
 The partial regional budget gives the total transport at any supported
 latitude,
@@ -315,7 +334,10 @@ they are not a separate public result type.
 ## 8. Minimal interface
 
 ```python
-topology = MultiBasinTopology.from_geometry(geometry)
+geometry = MultiBasinGeometry.from_bathymetry(
+  bathymetry.
+  H=1_000.0
+)
 
 forcing = GlobalForcing.from_time_series(
     wind_stress=wind_stress_anomaly,
@@ -324,10 +346,9 @@ forcing = GlobalForcing.from_time_series(
 )
 
 model = GlobalAdjustmentModel(
-    topology=topology,
+    geometry=geometry,
     forcing=forcing,
     g_prime=0.02,
-    H=1_000.0,
     rho0=1_027.0,
 )
 
@@ -337,7 +358,7 @@ atlantic_transport = output.transport.sel(region="atlantic_north")
 
 The exact constructors may evolve, but the ownership boundaries may not:
 
-- topology owns geometry, ordered connectivity, and boundary sharing;
+- Geometry owns boundaries, ordered connectivity, and boundary sharing;
 - forcing owns input preprocessing and Fourier conventions;
 - the model owns derivation of \(F_j\), \(r_j\), the global solve, and all
   diagnostics; and
@@ -347,7 +368,7 @@ The exact constructors may evolve, but the ownership boundaries may not:
 
 The implementation should fail early when:
 
-- the topology does not contain the five required regions and child order;
+- the geometry does not contain the five required regions and child order;
 - a boundary curve, mask, integration weight, \(x_e\), or \(x_b\) is missing;
 - forcing time axes, units, or anomaly conventions disagree;
 - the forcing frequency grid is incompatible with the requested model; or
