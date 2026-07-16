@@ -9,9 +9,11 @@ transition regions.
 $y_I=-34^\circ$, and the Atlantic northern closure is $54^\circ$N.
 
 **Forcing.** The input is vector Ekman transport itself, not wind stress:
-$\mathbf{M}_{\mathrm{Ek}}$ is a smooth, basin-tapered oscillation. The northern
-transport combines an 8 Sv pulse and a six-year oscillation. The southern
-transport is derived from the same $M_{\mathrm{Ek},y}$ field.
+$\mathbf{M}_{\mathrm{Ek}}$ is a smooth analytic oscillation evaluated on the
+full forcing grid. The model applies the geometry when deriving regional
+terms, avoiding artificial curl sheets from a discontinuous basin mask. The
+northern transport combines an 8 Sv pulse and a six-year oscillation. The
+southern transport is derived from the same $M_{\mathrm{Ek},y}$ field.
 
 The plots are a geometry schematic, time/latitude Hovmöllers, and a transfer
 amplitude (damping-factor) contour against **linear period**. No forcing
@@ -41,7 +43,6 @@ sys.path.insert(0, str(REPO / "notebooks"))
 from moc_adjustment_theory import GlobalAdjustmentModel, GlobalForcing
 from _example_helpers import (
     non_itf_geometry,
-    non_itf_taper,
     plot_geometry,
     section_transport,
     stitched_atlantic,
@@ -111,12 +112,6 @@ latitude = np.arange(y_S, y_NP + 0.1, 2.0)
 longitude = np.arange(0.0, 360.0, 4.0)
 years = np.arange(time.size) / 12.0
 
-taper = non_itf_taper(
-    geometry,
-    xr.DataArray(latitude, dims="latitude"),
-    xr.DataArray(longitude, dims="longitude"),
-    width_degrees=4.0,
-)
 wind_clock = xr.DataArray(
     np.sin(2 * np.pi * years / 9.0) + 0.45 * np.sin(2 * np.pi * years / 3.5),
     dims="time",
@@ -129,10 +124,10 @@ lon_shape = xr.DataArray(
     np.sin(np.deg2rad(longitude)), dims="longitude", coords={"longitude": longitude}
 )
 
-M_ek_y = (0.12 * wind_clock * lat_shape * taper).transpose(
+M_ek_y = (0.12 * wind_clock * lat_shape * xr.ones_like(lon_shape)).transpose(
     "time", "latitude", "longitude"
 )
-M_ek_x = (0.04 * wind_clock * lat_shape * lon_shape * taper).transpose(
+M_ek_x = (0.04 * wind_clock * lat_shape * lon_shape).transpose(
     "time", "latitude", "longitude"
 )
 M_ek_y.attrs.update(units="m2 s-1", positive="northward")
@@ -175,6 +170,12 @@ atlantic = xr.Dataset(
         "h_w": stitched_atlantic(output.h_w, geometry),
     }
 )
+
+# Guard against grid-row curl sheets from discontinuous preprocessing masks.
+h_b_rms = np.sqrt((atlantic.h_b**2).mean("time"))
+for boundary in (y_P, y_I):
+    window = h_b_rms.sel(latitude=slice(boundary - 4, boundary + 4))
+    assert float(window.max() / window.median()) < 2.0
 
 fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True, constrained_layout=True)
 specs = [
