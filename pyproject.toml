@@ -28,10 +28,12 @@ test = [
 ]
 docs = [
   "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.25",
 ]
 dev = [
   "build>=1.2",
   "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.25",
   "pytest>=8",
 ]
 
