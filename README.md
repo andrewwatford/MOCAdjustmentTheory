@@ -6,7 +6,7 @@ global meridional-overturning-circulation adjustment.
 The package is organized around four public objects:
 
 - `MultiBasinGeometry` for bathymetry-derived boundary traces and `H`;
-- `GlobalForcing` for aligned wind and boundary-transport anomalies;
+- `GlobalForcing` for aligned Ekman and boundary-transport anomalies;
 - `GlobalAdjustmentModel` for the frequency-domain solve; and
 - `GlobalAdjustmentOutput` for labelled time-domain diagnostics.
 

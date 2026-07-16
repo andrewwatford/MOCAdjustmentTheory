@@ -9,8 +9,8 @@ theory and return the complete time-dependent solution.
 The user workflow is deliberately short:
 
 1. construct a `MultiBasinGeometry`;
-2. construct one `GlobalForcing` from domain-wide wind-stress anomalies and
-   northern and southern boundary transports;
+2. construct one `GlobalForcing` from domain-wide Ekman-transport anomalies
+   and northern and southern boundary transports;
 3. give both objects to `GlobalAdjustmentModel` and solve the
    \(3\times3\times n_\omega\) frequency-domain system; and
 4. inspect a `GlobalAdjustmentOutput` containing \(h_e\), \(h_b\), \(h_w\), and
@@ -35,7 +35,7 @@ GlobalAdjustmentOutput
 geometry construction clearer. Users do not need to instantiate one in order
 to run the model.
 
-All labelled arrays should use `xarray`. Large wind fields and geometry masks
+All labelled arrays should use `xarray`. Large Ekman-transport fields and geometry masks
 may be backed by `dask`; the final \(3\times3\) solves are small dense linear
 algebra and do not need distributed machinery.
 
@@ -85,57 +85,64 @@ on all five regions.
 
 ## 4. One forcing object
 
-`GlobalForcing` accepts three domain-wide inputs on a common time record:
+`GlobalForcing` accepts three domain-wide forcing categories on a common time
+record:
 
-- wind-stress anomalies \(\tau'_x(x,y,t)\) and \(\tau'_y(x,y,t)\);
+- vector Ekman-transport anomalies
+  \(\mathbf M_{\mathrm{Ek}}=(M_{\mathrm{Ek},x},M_{\mathrm{Ek},y})\);
 - northern total transport \(T_N(t)\); and
 - southern total transport \(T_S(t)\).
+
+Signs are fixed throughout: \(M_{\mathrm{Ek},x}\) is positive eastward,
+\(M_{\mathrm{Ek},y}\) and every supplied or reported meridional transport are
+positive northward, and \(w_{\mathrm{Ek}}=\nabla\!\cdot\mathbf M_{\mathrm{Ek}}\)
+is positive upward.
 
 Only the total transports at the external northern and southern closures are
 supplied. Ekman transports at internal sections, including \(T_{I,\mathrm{Ek}}\)
 and \(T_{P,\mathrm{Ek}}\), are never independent inputs. They are derived from
-the same wind stress used to calculate Ekman pumping. This prevents a regional
-transport prescription from contradicting the area-integrated wind forcing.
+the same vector field used to calculate Ekman pumping. This prevents a
+regional prescription from contradicting the area-integrated Ekman forcing.
 
 The forcing constructor is responsible for:
 
 1. aligning the time axes and checking units;
 2. forming or validating anomalies;
-3. applying any declared detrending, gap filling, or tapering;
-4. padding the common record;
-5. applying `rfft` to every input with one convention; and
-6. retaining everything needed to apply the matching `irfft` and crop.
+3. padding the common record;
+4. applying `rfft` to every input with one convention; and
+5. retaining everything needed to apply the matching `irfft` and crop.
 
 The original time-domain inputs and preprocessing metadata remain available
 for provenance.
 
 ### 4.1 Ekman quantities
 
-The wind is converted to kinematic stress with one density \(\rho_0\). Near the
-equator the inverse Coriolis parameter is regularized consistently, for
-example with
-
-\[
-I_\gamma(f)=\frac{f}{f^2+\gamma^2}.
-\]
-
-The Ekman transport and pumping are then
+The user supplies \(\mathbf M_{\mathrm{Ek}}\) directly in
+\(\mathrm{m^2\,s^{-1}}\). Converting wind stress to that field is deliberately
+outside the package. A user may, for example, choose
 
 \[
 \mathbf M_{\mathrm{Ek}}
 =
 \left(
-\frac{\tau'_y}{\rho_0}I_\gamma,
--\frac{\tau'_x}{\rho_0}I_\gamma
+I_\gamma(f)\frac{\tau'_y}{\rho_0},
+-I_f(f)\frac{\tau'_x}{\rho_0}
 \right),
-\qquad
+\]
+
+with their own regularization operators, reference density, and coastal
+taper. None of \(\rho_0\), \(I_\gamma\), \(I_f\), or the taper is a model
+parameter. The package derives
+
+\[
 w_{\mathrm{Ek}}=\nabla\!\cdot\mathbf M_{\mathrm{Ek}}.
 \]
 
-The model samples this one derived field against the geometry to obtain every
-regional pumping integral and every Ekman section transport. Dask-backed
-differentiation and reductions may be used, but the resulting regional arrays
-should be small and eagerly validated before the solve.
+The model samples this derived scalar field and the supplied vector field
+against the geometry to obtain every regional pumping integral and every
+Ekman section transport. Dask-backed differentiation and reductions may be
+used, but the resulting regional arrays should be small and eagerly validated
+before the solve.
 
 ### 4.2 Cheap compatibility diagnostic
 
@@ -151,8 +158,8 @@ For each region the implementation may expose
 This is a diagnostic, not another forcing constraint. It should reuse the
 already-computed pumping and section transports, so calculating it requires
 only regional reductions and no additional derivatives, transforms, or
-solves. Small residuals can arise from masks, discretization, and the
-regularized equatorial band. No separate lateral shelf flux is prescribed.
+solves. Residuals can reflect discretization or nonzero flux through the
+user-chosen lateral taper. No separate lateral shelf flux is prescribed.
 
 ## 5. Fourier contract
 
@@ -168,8 +175,8 @@ The default convention is:
   \(e^{-i\omega\tau}\);
 - non-negative angular frequency
   \(\omega=2\pi\,\mathrm{rfftfreq}(n_{\rm fft},\Delta t)\);
-- zero padding sufficient to isolate the retained interval from circular
-  wraparound (normally at least \(n-1\) samples on each side);
+- reflected padding of normally \(n-1\) samples on each side, followed by any
+  zero extension required by the declared `n_fft`;
 - a zero anomaly at the zero-frequency bin; and
 - matching `irfft`, crop, coordinates, and units on output.
 
@@ -342,16 +349,18 @@ geometry = MultiBasinGeometry.from_isobath_dataset(
 )
 
 forcing = GlobalForcing.from_time_series(
-    wind_stress=wind_stress_anomaly,
+    M_ek_x=ekman_transport_anomaly.x,
+    M_ek_y=ekman_transport_anomaly.y,
     northern_transport=northern_transport,
     southern_transport=southern_transport,
+    sample_interval_seconds=365.25 * 86_400 / 12,
+    n_fft=2_048,
 )
 
 model = GlobalAdjustmentModel(
     geometry=geometry,
     forcing=forcing,
     g_prime=0.02,
-    rho0=1_027.0,
 )
 
 output = model.solve()
@@ -379,7 +388,7 @@ The implementation should fail early when:
 The core acceptance tests are intentionally limited:
 
 1. forcing `rfft`/`irfft` round trips recover the retained input interval;
-2. zero wind produces zero derived Ekman pumping and section transports;
+2. zero vector Ekman transport produces zero pumping and section transports;
 3. regional compatibility residuals converge with grid refinement;
 4. the vectorized solve matches direct solves of each \(3\times3\) system;
 5. the solved fields satisfy the original regional volume budgets;

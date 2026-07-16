@@ -292,11 +292,12 @@ class MultiBasinGeometry:
             self._dataset.longitude.sel(trace=str(mapping.sel(region=region).item()))
             for region in REGION_KEYS
         ]
-        return xr.concat(
+        result = xr.concat(
             arrays, dim=xr.IndexVariable("region", list(REGION_KEYS))
-        ).where(
-            self.region_mask
-        )
+        ).where(self.region_mask)
+        if "trace" in result.coords:
+            result = result.drop_vars("trace")
+        return result
 
     @property
     def x_b(self) -> xr.DataArray:
@@ -313,15 +314,23 @@ class MultiBasinGeometry:
     def boundaries_on(self, latitude: xr.DataArray | np.ndarray) -> xr.Dataset:
         """Interpolate region boundaries to a model latitude grid."""
 
-        target = xr.DataArray(np.asarray(latitude, dtype=float), dims="latitude")
-        result = xr.Dataset(
-            {
-                "x_b": self.x_b.interpolate_na("latitude").interp(latitude=target),
-                "x_e": self.x_e.interpolate_na("latitude").interp(latitude=target),
-            }
+        target = np.asarray(latitude, dtype=float)
+        if target.ndim != 1 or not np.all(np.diff(target) > 0):
+            raise ValueError("target latitude must be one-dimensional and increasing")
+        variables: dict[str, tuple[tuple[str, str], np.ndarray]] = {}
+        for name, source in (("x_b", self.x_b), ("x_e", self.x_e)):
+            values = np.full((len(REGION_KEYS), target.size), np.nan)
+            for index, region in enumerate(REGION_KEYS):
+                trace = source.sel(region=region).dropna("latitude")
+                source_latitude = np.asarray(trace.latitude, dtype=float)
+                inside = (target >= source_latitude[0]) & (
+                    target <= source_latitude[-1]
+                )
+                values[index, inside] = np.interp(
+                    target[inside], source_latitude, np.asarray(trace, dtype=float)
+                )
+            variables[name] = (("region", "latitude"), values)
+        return xr.Dataset(
+            variables,
+            coords={"region": list(REGION_KEYS), "latitude": target},
         )
-        mask = (
-            (target >= self._dataset.region_south)
-            & (target <= self._dataset.region_north)
-        ).transpose("region", "latitude")
-        return result.where(mask)
