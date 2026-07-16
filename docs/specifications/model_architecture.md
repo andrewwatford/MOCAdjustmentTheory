@@ -8,7 +8,7 @@ theory and return the complete time-dependent solution.
 
 The user workflow is deliberately short:
 
-1. construct a `MultiBasinTopology`;
+1. construct a `MultiBasinGeometry`;
 2. construct one `GlobalForcing` from domain-wide wind-stress anomalies and
    northern and southern boundary transports;
 3. give both objects to `GlobalAdjustmentModel` and solve the
@@ -25,23 +25,23 @@ selections from the global output, not a second solver.
 The intended public surface is:
 
 ```python
-MultiBasinTopology
+MultiBasinGeometry
 GlobalForcing
 GlobalAdjustmentModel
 GlobalAdjustmentOutput
 ```
 
 `Basin` may be retained as an internal or convenience value object if it makes
-topology construction clearer. Users do not need to instantiate one in order
+geometry construction clearer. Users do not need to instantiate one in order
 to run the model.
 
 All labelled arrays should use `xarray`. Large wind fields and geometry masks
 may be backed by `dask`; the final \(3\times3\) solves are small dense linear
 algebra and do not need distributed machinery.
 
-## 3. Multi-basin topology
+## 3. Multi-basin geometry
 
-`MultiBasinTopology` is the single description of the domain. It contains both
+`MultiBasinGeometry` is the single description of the domain. It contains both
 the geometric information required for integrations and the directed,
 ordered topology required for the budgets.
 
@@ -66,7 +66,7 @@ region 4 -> [region 2, region 1]
 ```
 
 Changing child order changes the algebra and must therefore be explicit and
-validated. The topology also records boundary curves, latitude coordinates,
+validated. The geometry also records boundary curves, latitude coordinates,
 region masks, integration weights, and the locations \(x_e(y)\) and \(x_b(y)\).
 Here \(x_b\) is just outside the western boundary-current region; it is not the
 western coastline.
@@ -79,7 +79,7 @@ h_I : regions 2 and 4
 h_P : regions 3 and 5
 ```
 
-The topology owns that sharing map so downstream results can still be exposed
+The geometry owns that sharing map so downstream results can still be exposed
 on all five regions.
 
 ## 4. One forcing object
@@ -131,7 +131,7 @@ The Ekman transport and pumping are then
 w_{\mathrm{Ek}}=\nabla\!\cdot\mathbf M_{\mathrm{Ek}}.
 \]
 
-The model samples this one derived field against the topology to obtain every
+The model samples this one derived field against the geometry to obtain every
 regional pumping integral and every Ekman section transport. Dask-backed
 differentiation and reductions may be used, but the resulting regional arrays
 should be small and eagerly validated before the solve.
@@ -179,7 +179,7 @@ error; it may not silently reinterpret it.
 
 ## 6. GlobalAdjustmentModel
 
-`GlobalAdjustmentModel` ingests one topology, one forcing, and the physical
+`GlobalAdjustmentModel` ingests one geometry, one forcing, and the physical
 parameters. It derives all geometry-dependent forcing terms, assembles the
 fixed global system at every frequency, solves it, reconstructs the complete
 diagnostics, and applies the forcing-owned inverse transform.
@@ -277,7 +277,7 @@ Every call to `solve()` returns a `GlobalAdjustmentOutput`. It always contains
 time-domain values for all five regions:
 
 - `h_e(time, region)` — eastern-boundary thickness, with shared values repeated
-  according to the topology map;
+  according to the geometry map;
 - `h_b(time, region, latitude)` — thickness at \(x_b(y)\), outside the western
   boundary-current region;
 - `h_w(time, region, latitude)` — western-boundary thickness inferred from the
@@ -334,7 +334,7 @@ they are not a separate public result type.
 ## 8. Minimal interface
 
 ```python
-topology = MultiBasinTopology.from_geometry(geometry)
+geometry = MultiBasinGeometry.from_bathymetry(bathymetry)
 
 forcing = GlobalForcing.from_time_series(
     wind_stress=wind_stress_anomaly,
@@ -343,7 +343,7 @@ forcing = GlobalForcing.from_time_series(
 )
 
 model = GlobalAdjustmentModel(
-    topology=topology,
+    geometry=geometry,
     forcing=forcing,
     g_prime=0.02,
     H=1_000.0,
@@ -356,7 +356,7 @@ atlantic_transport = output.transport.sel(region="atlantic_north")
 
 The exact constructors may evolve, but the ownership boundaries may not:
 
-- topology owns geometry, ordered connectivity, and boundary sharing;
+- Geometry owns boundaries, ordered connectivity, and boundary sharing;
 - forcing owns input preprocessing and Fourier conventions;
 - the model owns derivation of \(F_j\), \(r_j\), the global solve, and all
   diagnostics; and
@@ -366,7 +366,7 @@ The exact constructors may evolve, but the ownership boundaries may not:
 
 The implementation should fail early when:
 
-- the topology does not contain the five required regions and child order;
+- the geometry does not contain the five required regions and child order;
 - a boundary curve, mask, integration weight, \(x_e\), or \(x_b\) is missing;
 - forcing time axes, units, or anomaly conventions disagree;
 - the forcing frequency grid is incompatible with the requested model; or
