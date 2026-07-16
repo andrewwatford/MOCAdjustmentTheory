@@ -5,7 +5,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from moc_adjustment_theory import GlobalForcing
+from moc_adjustment_theory import FFTConvention
+from moc_adjustment_theory.forcing import _normalise_forcing, _resolve_fft
 
 
 def manual_roundtrip(values: np.ndarray, *, pad: int = 7, n_fft: int = 32) -> np.ndarray:
@@ -16,139 +17,115 @@ def manual_roundtrip(values: np.ndarray, *, pad: int = 7, n_fft: int = 32) -> np
     return np.fft.irfft(spectrum, n=n_fft, axis=0)[pad : pad + values.shape[0]]
 
 
-def forcing_inputs(*, chunks: bool = False) -> dict[str, xr.DataArray]:
+def forcing_dataset(*, chunks: bool = False) -> xr.Dataset:
     time = np.arange("2001-01-01", "2001-01-09", dtype="datetime64[D]")
     latitude = np.array([-30.0, 30.0])
     longitude = np.array([0.0, 10.0, 20.0])
     phase = 2.0 * np.pi * np.arange(time.size) / time.size
-    M_ek_x_values = np.sin(phase)[:, None, None] * np.ones(
+    M_Ek_x = np.sin(phase)[:, None, None] * np.ones(
         (1, latitude.size, longitude.size)
     )
-    M_ek_y_values = np.cos(phase)[:, None, None] * np.ones(
+    M_Ek_y = np.cos(phase)[:, None, None] * np.ones(
         (1, latitude.size, longitude.size)
     )
     if chunks:
-        M_ek_x_values = dsa.from_array(M_ek_x_values, chunks=(4, 1, 3))
-        M_ek_y_values = dsa.from_array(M_ek_y_values, chunks=(4, 1, 3))
-    coordinates = {
-        "time": time,
-        "latitude": latitude,
-        "longitude": longitude,
-    }
-    return {
-        "M_ek_x": xr.DataArray(
-            M_ek_x_values,
-            dims=("time", "latitude", "longitude"),
-            coords=coordinates,
-            attrs={"units": "m2 s-1"},
-        ),
-        "M_ek_y": xr.DataArray(
-            M_ek_y_values,
-            dims=("time", "latitude", "longitude"),
-            coords=coordinates,
-            attrs={"units": "m^2/s"},
-        ),
-        "northern_transport": xr.DataArray(
-            10.0 + np.cos(phase),
-            dims="time",
-            coords={"time": time},
-            attrs={"units": "Sv"},
-        ),
-        "southern_transport": xr.DataArray(
-            np.zeros(time.size),
-            dims="time",
-            coords={"time": time},
-            attrs={"units": "m3 s-1"},
-        ),
-    }
+        M_Ek_x = dsa.from_array(M_Ek_x, chunks=(4, 1, 3))
+        M_Ek_y = dsa.from_array(M_Ek_y, chunks=(4, 1, 3))
+    coordinates = {"time": time, "latitude": latitude, "longitude": longitude}
+    return xr.Dataset(
+        {
+            "M_Ek_x": xr.DataArray(
+                M_Ek_x,
+                dims=("time", "latitude", "longitude"),
+                coords=coordinates,
+                attrs={"units": "m2 s-1"},
+            ),
+            "M_Ek_y": xr.DataArray(
+                M_Ek_y,
+                dims=("time", "latitude", "longitude"),
+                coords=coordinates,
+                attrs={"units": "m^2/s"},
+            ),
+            "T_N": xr.DataArray(
+                10.0 + np.cos(phase),
+                dims="time",
+                coords={"time": time},
+                attrs={"units": "Sv"},
+            ),
+        }
+    )
 
 
 def test_one_reflected_fft_convention_round_trips_every_input() -> None:
-    forcing = GlobalForcing.from_time_series(
-        **forcing_inputs(), padding_samples=7, n_fft=32
+    forcing = _normalise_forcing(forcing_dataset())
+    transform = _resolve_fft(
+        FFTConvention(padding_samples=7, n_fft=32), forcing.time
     )
+    spectral = transform.transform_dataset(forcing)
 
-    assert forcing.n_fft == 32
-    assert forcing.padding_samples == 7
-    assert forcing.sample_interval_seconds == 86400.0
-    assert forcing.spectral.omega.attrs["units"] == "rad s-1"
-    for name in forcing.time_domain.data_vars:
-        reconstructed = forcing.inverse_transform(forcing.spectral[name])
-        expected = manual_roundtrip(np.asarray(forcing.time_domain[name]))
-        np.testing.assert_allclose(reconstructed, expected)
-        assert complex(forcing.spectral[name].isel(omega=0).max()) == 0j
-    assert forcing.time_domain.northern_transport.attrs["units"] == "m3 s-1"
-    assert float(forcing.time_domain.northern_transport.max()) == pytest.approx(1e6)
-
-
-def test_transform_and_inverse_inherit_the_forcing_coordinates() -> None:
-    forcing = GlobalForcing.from_time_series(
-        **forcing_inputs(), padding_samples=7, n_fft=32
-    )
-    signal = xr.DataArray(
-        np.arange(16, dtype=float).reshape(8, 2),
-        dims=("time", "region"),
-        coords={"time": forcing.time_domain.time, "region": ["one", "two"]},
-    )
-    spectrum = forcing.transform(signal)
-    result = forcing.inverse_transform(spectrum)
-
-    assert spectrum.dims == ("omega", "region")
-    assert result.dims == ("time", "region")
-    np.testing.assert_allclose(result, manual_roundtrip(np.asarray(signal)))
+    assert spectral.attrs["n_fft"] == 32
+    assert spectral.attrs["padding_samples"] == 7
+    assert spectral.attrs["sample_interval_seconds"] == 86400.0
+    assert spectral.omega.attrs["units"] == "rad s-1"
+    for name in forcing.data_vars:
+        reconstructed = transform.inverse_transform(spectral[name])
+        np.testing.assert_allclose(
+            reconstructed, manual_roundtrip(np.asarray(forcing[name]))
+        )
+        assert complex(spectral[name].isel(omega=0).max()) == 0j
+    assert forcing.T_N.attrs["units"] == "m3 s-1"
+    assert float(forcing.T_N.max()) == pytest.approx(1e6)
 
 
 def test_dask_ekman_transport_spectra_remain_lazy() -> None:
-    forcing = GlobalForcing.from_time_series(
-        **forcing_inputs(chunks=True), padding_samples=7, n_fft=32
+    forcing = _normalise_forcing(forcing_dataset(chunks=True))
+    transform = _resolve_fft(
+        FFTConvention(padding_samples=7, n_fft=32), forcing.time
     )
+    spectral = transform.transform_dataset(forcing)
 
-    assert isinstance(forcing.spectral.M_ek_x.data, dsa.Array)
+    assert isinstance(spectral.M_Ek_x.data, dsa.Array)
     np.testing.assert_allclose(
-        forcing.inverse_transform(forcing.spectral.M_ek_x).compute(),
-        manual_roundtrip(np.asarray(forcing.time_domain.M_ek_x.compute())),
+        transform.inverse_transform(spectral.M_Ek_x).compute(),
+        manual_roundtrip(np.asarray(forcing.M_Ek_x.compute())),
     )
 
 
 def test_calendar_month_sampling_can_be_declared_explicitly() -> None:
-    inputs = forcing_inputs()
-    monthly = np.arange("2001-01", "2001-09", dtype="datetime64[M]")
-    inputs = {
-        name: array.assign_coords(time=monthly) for name, array in inputs.items()
-    }
-    with pytest.raises(ValueError, match="uniformly sampled"):
-        GlobalForcing.from_time_series(**inputs)
-
-    forcing = GlobalForcing.from_time_series(
-        **inputs,
-        sample_interval_seconds=365.25 * 86400.0 / 12.0,
-        n_fft=32,
+    forcing = forcing_dataset().assign_coords(
+        time=np.arange("2001-01", "2001-09", dtype="datetime64[M]")
     )
-    assert forcing.sample_interval_seconds == pytest.approx(365.25 * 86400.0 / 12.0)
+    with pytest.raises(ValueError, match="uniformly sampled"):
+        _resolve_fft(FFTConvention(), forcing.time)
+
+    transform = _resolve_fft(
+        FFTConvention(
+            sample_interval_seconds=365.25 * 86400.0 / 12.0,
+            n_fft=32,
+        ),
+        forcing.time,
+    )
+    assert transform.sample_interval_seconds == pytest.approx(
+        365.25 * 86400.0 / 12.0
+    )
 
 
 def test_explicit_interval_still_requires_increasing_unique_time() -> None:
-    inputs = forcing_inputs()
-    shuffled = np.asarray(inputs["M_ek_x"].time).copy()
+    forcing = forcing_dataset()
+    shuffled = np.asarray(forcing.time).copy()
     shuffled[[2, 3]] = shuffled[[3, 2]]
-    for name in inputs:
-        inputs[name] = inputs[name].assign_coords(time=shuffled)
+    forcing = forcing.assign_coords(time=shuffled)
     with pytest.raises(ValueError, match="unique and strictly increasing"):
-        GlobalForcing.from_time_series(
-            **inputs,
-            sample_interval_seconds=86_400.0,
+        _resolve_fft(
+            FFTConvention(sample_interval_seconds=86_400.0), forcing.time
         )
 
 
-def test_missing_or_inconsistent_forcing_fails_early() -> None:
-    inputs = forcing_inputs()
-    inputs["M_ek_x"] = inputs["M_ek_x"].where(
-        inputs["M_ek_x"].time.dt.day != 3
-    )
-    with pytest.raises(ValueError, match="cannot contain missing"):
-        GlobalForcing.from_time_series(**inputs)
+def test_forcing_schema_and_missing_values_fail_early() -> None:
+    with pytest.raises(ValueError, match="exactly M_Ek_x"):
+        _normalise_forcing(forcing_dataset().drop_vars("T_N"))
 
-    inputs = forcing_inputs()
-    inputs["northern_transport"] = inputs["northern_transport"].isel(time=slice(1, None))
-    with pytest.raises(ValueError):
-        GlobalForcing.from_time_series(**inputs)
+    forcing = forcing_dataset()
+    forcing["M_Ek_x"] = forcing.M_Ek_x.where(forcing.time.dt.day != 3)
+    with pytest.raises(ValueError, match="cannot contain missing"):
+        _normalise_forcing(forcing)

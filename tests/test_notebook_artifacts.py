@@ -6,11 +6,7 @@ from pathlib import Path
 import pytest
 
 
-NOTEBOOKS = (
-    "01_idealized_non_itf_adjustment.ipynb",
-    "02_global_non_itf_osnap.ipynb",
-    "03_atlantic_scotia_decomposition.ipynb",
-)
+NOTEBOOKS = ("global_era5_scotia.ipynb",)
 
 
 @pytest.mark.parametrize("name", NOTEBOOKS)

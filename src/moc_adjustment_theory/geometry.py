@@ -37,6 +37,8 @@ _REGION_METADATA_VARIABLES = (
 def _embedded_region_definitions(
     dataset: xr.Dataset,
 ) -> dict[str, dict[str, object]] | None:
+    """Read the five-region layout embedded in a canonical isobath product."""
+
     present = [name in dataset for name in _REGION_METADATA_VARIABLES]
     if not any(present):
         return None
@@ -61,6 +63,8 @@ def _embedded_region_definitions(
 def _normalise_regions(
     definitions: Mapping[str, Mapping[str, object]],
 ) -> dict[str, dict[str, object]]:
+    """Validate region bounds and the fixed five-region stitching pattern."""
+
     if set(definitions) != set(REGION_KEYS):
         missing = sorted(set(REGION_KEYS) - set(definitions))
         extra = sorted(set(definitions) - set(REGION_KEYS))
@@ -112,6 +116,8 @@ def _normalise_regions(
 def _insert_endpoints(
     traces: xr.Dataset, regions: Mapping[str, Mapping[str, object]]
 ) -> xr.Dataset:
+    """Insert exact region endpoints by interpolation within trace support."""
+
     endpoints = {
         float(value)
         for definition in regions.values()
@@ -161,6 +167,8 @@ def _assemble_dataset(
     region_definitions: Mapping[str, Mapping[str, object]],
     provenance: Mapping[str, object],
 ) -> xr.Dataset:
+    """Assemble validated trace and region metadata into the internal dataset."""
+
     regions = _normalise_regions(region_definitions)
     trace_names = set(map(str, traces.trace.values))
     referenced = {

@@ -1,16 +1,18 @@
 # MOC Adjustment Theory
 
-`moc-adjustment-theory` implements the five-region reduced-gravity model of
-global meridional-overturning-circulation adjustment. The framework uses the
-closed-Indian/closed-Pacific topology and does not include an Indonesian
-Throughflow connection.
+`moc-adjustment-theory` implements the five-region, reduced-gravity model of
+global meridional-overturning-circulation adjustment.
 
-The package is organized around four public objects:
+The public workflow is deliberately small:
 
-- `MultiBasinGeometry` for bathymetry-derived boundary traces and `H`;
-- `GlobalForcing` for aligned Ekman and boundary-transport anomalies;
-- `GlobalAdjustmentModel` for the frequency-domain solve; and
-- `GlobalAdjustmentOutput` for labelled time-domain diagnostics.
+1. load a canonical `MultiBasinGeometry` isobath product;
+2. put `M_Ek_x`, `M_Ek_y`, and northern total transport `T_N` in one
+   `xarray.Dataset`;
+3. choose an `FFTConvention`; and
+4. solve with `GlobalAdjustmentModel`.
+
+The result contains `h_e`, `h_b`, `h_w`, and total, Ekman, and geostrophic
+transport for all five regions.
 
 ## Development installation
 
@@ -20,16 +22,13 @@ python -m pytest
 python -m mkdocs build --strict
 ```
 
-To run the worked notebooks, install the example dependencies and point them
-at the local scientific-data checkout:
+To run the worked example, install the example dependencies and point it at
+the local ERA5 and SCOTIA data checkout:
 
 ```bash
 python -m pip install -e '.[examples]'
 export MOC_EXAMPLE_DATA_ROOT=/path/to/data/untracked
 ```
 
-Geometry is loaded from a compact six-trace isobath dataset with explicit
-variable mappings and region bounds. Bathymetry extraction remains an
-auxiliary notebook workflow rather than package functionality. See the
-[documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/) for the
-architecture and geometry configuration contract.
+See the [documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)
+for the geometry convention, API, equations, and ERA5 + SCOTIA example.

@@ -25,11 +25,7 @@ nav:
   - Home: index.md
   - Geometry: geometry.md
   - Core API: core_api.md
-  - Worked examples:
-      - Overview: examples/index.md
-      - Idealized adjustment: examples/01_idealized_non_itf_adjustment.md
-      - Global ERA5 + OSNAP: examples/02_global_non_itf_osnap.md
-      - Atlantic SCOTIA decomposition: examples/03_atlantic_scotia_decomposition.md
+  - Global ERA5 + SCOTIA: global_era5_scotia.md
   - Model architecture: specifications/model_architecture.md
 
 strict: true

@@ -1,51 +1,39 @@
 # Geometry
 
-`MultiBasinGeometry` is a compact xarray-backed description of the six
-physical boundary traces used by the five-region model. It carries the shared
-active-layer/isobath depth `H`, but no wind-grid masks, forcing, or solver
-state.
+`MultiBasinGeometry` holds the six physical boundary traces, five region
+mappings and latitude bounds, and shared active-layer/isobath depth `H`.
+It contains no forcing-grid mask or solver state.
 
-## Loading an isobath product
-
-The package boundary is a compact isobath dataset, not raw bathymetry. The
-variable convention and every model-region limit remain explicit:
+## Canonical isobath product
 
 ```python
-geometry = MultiBasinGeometry.from_isobath_dataset(
-    isobaths,
-    trace_variables={
-        "atlantic_west": "x_wA",
-        "atlantic_east": "x_eA",
-        "indian_west": "x_wI",
-        "indian_east": "x_eI",
-        "pacific_west": "x_wP",
-        "pacific_east": "x_eP",
-    },
-    region_definitions={
-        "atlantic_north": {
-            "west": "atlantic_west",
-            "east": "atlantic_east",
-            "south": y_I,
-            "north": y_N,
-        },
-        # The other four required regions use the same schema.
-    },
-)
+geometry = MultiBasinGeometry.from_isobath_dataset(isobaths)
 ```
 
-Every `south` and `north` value must be finite and explicit. The constructor
-validates the fixed five-region stitching, trace coverage, boundary ordering,
-and consistency between `H` and the dataset's `isobath_depth_m` attribute.
-Explicitly requested endpoints are interpolated only when bracketed by finite
-source samples; missing gateways are never extrapolated or silently filled.
+The file convention is authoritative. It contains these six
+`(latitude,)` variables:
 
-The canonical dataset exposes `longitude(trace, latitude)`, `valid`, the
-region trace mappings and bounds, and provenance. `geometry.x_b` and
-`geometry.x_e` provide the derived `(region, latitude)` boundary views.
+```text
+atlantic_west   atlantic_east
+indian_west     indian_east
+pacific_west    pacific_east
+```
+
+It also contains the `region` coordinate and `region_west_trace`,
+`region_east_trace`, `region_south`, and `region_north`. The user does not
+repeat those names or bounds in a potentially conflicting schema.
+
+The loader validates the fixed five-region stitching, trace coverage,
+boundary ordering, and consistency between `H` and `isobath_depth_m`. Exact
+region endpoints are interpolated only inside finite trace support; missing
+gateways are not extrapolated.
+
+`geometry.x_b` and `geometry.x_e` are the resulting `(region, latitude)`
+boundary views. Here `x_b` is outside the western boundary-current region,
+not at the coastline.
 
 ## Producing the product
 
 [`extract_isobath_gebco.ipynb`](https://github.com/andrewwatford/MOCAdjustmentTheory/blob/main/notebooks/extract_isobath_gebco.ipynb)
-is the auxiliary, inspectable workflow for turning GEBCO bathymetry into the
-six traces. Its geographic decisions—windows, closures, and feature cleanup—
-do not need a second implementation inside the package.
+is the auxiliary workflow that writes the canonical variables and region
+metadata. Raw bathymetry processing is intentionally outside the package.

@@ -5,8 +5,10 @@ import pytest
 import xarray as xr
 
 from moc_adjustment_theory import (
+    EARTH_RADIUS,
+    EARTH_ROTATION_RATE,
+    FFTConvention,
     GlobalAdjustmentModel,
-    GlobalForcing,
     MultiBasinGeometry,
 )
 
@@ -43,6 +45,11 @@ REGIONS = {
         "north": -44.0,
     },
 }
+
+def test_geophysical_constants_are_public() -> None:
+    assert EARTH_RADIUS == 6.371e6
+    assert EARTH_ROTATION_RATE == 7.292115e-5
+
 
 def model_geometry() -> MultiBasinGeometry:
     latitude = np.arange(-60.0, 66.0)
@@ -89,10 +96,9 @@ def model_forcing(
     *,
     ekman_amplitude: float = 0.0,
     northern_amplitude: float = 1.0,
-    southern_amplitude: float = 0.0,
     grid_spacing: float = 5.0,
     zonal_fraction: float = 0.2,
-) -> GlobalForcing:
+) -> xr.Dataset:
     time = np.arange("2001-01-01", "2001-01-13", dtype="datetime64[D]")
     latitude = np.arange(-60.0, 65.0 + 0.5 * grid_spacing, grid_spacing)
     longitude = np.arange(0.0, 360.0, grid_spacing)
@@ -102,14 +108,14 @@ def model_forcing(
         * (1.0 + 0.2 * np.cos(np.deg2rad(longitude)))[None, None, :]
     )
     temporal = np.sin(phase)[:, None, None]
-    M_ek_y = xr.DataArray(
+    M_Ek_y = xr.DataArray(
         ekman_amplitude * temporal * spatial,
         dims=("time", "latitude", "longitude"),
         coords={"time": time, "latitude": latitude, "longitude": longitude},
         attrs={"units": "m2 s-1"},
     )
     zonal_structure = np.sin(np.deg2rad(longitude))[None, None, :]
-    M_ek_x = xr.DataArray(
+    M_Ek_x = xr.DataArray(
         zonal_fraction
         * ekman_amplitude
         * temporal
@@ -125,19 +131,8 @@ def model_forcing(
         coords={"time": time},
         attrs={"units": "Sv"},
     )
-    southern = xr.DataArray(
-        southern_amplitude * np.cos(phase),
-        dims="time",
-        coords={"time": time},
-    )
-    southern.attrs["units"] = "Sv"
-    return GlobalForcing.from_time_series(
-        M_ek_x=M_ek_x,
-        M_ek_y=M_ek_y,
-        northern_transport=northern,
-        southern_transport=southern,
-        padding_samples=time.size - 1,
-        n_fft=64,
+    return xr.Dataset(
+        {"M_Ek_x": M_Ek_x, "M_Ek_y": M_Ek_y, "T_N": northern}
     )
 
 
@@ -155,23 +150,23 @@ def test_zero_ekman_solution_closes_budgets_and_returns_every_field() -> None:
         "compatibility_residual",
     }
     xr.testing.assert_allclose(
-        output.transport,
-        output.transport_ekman + output.transport_geostrophic,
+        output.dataset.transport,
+        output.dataset.transport_ekman + output.dataset.transport_geostrophic,
     )
     assert float(abs(output.spectral.southern_budget_residual).max()) < 1e-6
-    assert float(abs(output.transport_ekman).max()) < 1e-12
+    assert float(abs(output.dataset.transport_ekman).max()) < 1e-12
     assert float(abs(output.spectral.compatibility_residual).max()) < 1e-12
     assert np.isfinite(output.spectral.condition_number.isel(omega=slice(1, None))).all()
-    assert output.spectral.attrs["n_fft"] == 64
+    assert output.spectral.attrs["n_fft"] >= output.dataset.sizes["time"]
     assert output.dataset.attrs["padding_mode"] == "reflect"
     assert output.dataset.attrs["time_mean_removed"] is True
     np.testing.assert_allclose(
-        output.h_e.sel(region="indian_north"),
-        output.h_e.sel(region="atlantic_indian_transition"),
+        output.dataset.h_e.sel(region="indian_north"),
+        output.dataset.h_e.sel(region="atlantic_indian_transition"),
     )
     np.testing.assert_allclose(
-        output.h_e.sel(region="pacific_north"),
-        output.h_e.sel(region="atlantic_pacific_transition"),
+        output.dataset.h_e.sel(region="pacific_north"),
+        output.dataset.h_e.sel(region="atlantic_pacific_transition"),
     )
 
     spectral = output.spectral
@@ -214,16 +209,16 @@ def test_vector_transport_is_derived_into_ekman_and_geostrophic_components() -> 
         model_geometry(), model_forcing(ekman_amplitude=0.1)
     ).solve()
 
-    assert float(abs(output.transport_ekman).max()) > 0.0
+    assert float(abs(output.dataset.transport_ekman).max()) > 0.0
     assert np.isfinite(output.spectral.compatibility_residual).all()
-    relation = output.h_e - (
+    relation = output.dataset.h_e - (
         2.0
         * 7.292115e-5
-        * np.sin(np.deg2rad(output.h_w.latitude))
-        * output.transport_geostrophic
+        * np.sin(np.deg2rad(output.dataset.h_w.latitude))
+        * output.dataset.transport_geostrophic
         / (0.02 * 1000.0)
     )
-    xr.testing.assert_allclose(output.h_w, relation)
+    xr.testing.assert_allclose(output.dataset.h_w, relation)
 
 
 def test_compatibility_residual_converges_with_grid_refinement() -> None:
@@ -296,10 +291,10 @@ def test_vectorized_solution_matches_one_direct_frequency_solve() -> None:
             F.sel(region="atlantic_north")
             + F.sel(region="atlantic_indian_transition")
             + F.sel(region="atlantic_pacific_transition")
-            + forcing.spectral.northern_transport.isel(omega=index)
+            + spectral.T_N.isel(omega=index)
             + transport_I_ekman
             + transport_P_ekman
-            - forcing.spectral.southern_transport.isel(omega=index),
+            - spectral.T_S.isel(omega=index),
             F.sel(region="indian_north") - transport_I_ekman,
             F.sel(region="pacific_north") - transport_P_ekman,
         ],
@@ -325,17 +320,14 @@ def test_transport_at_interpolates_only_inside_region_support() -> None:
         output.transport_at("atlantic_north", -40.0)
 
 
-def test_external_transports_are_positive_northward() -> None:
-    northern = GlobalAdjustmentModel(
-        model_geometry(),
-        model_forcing(northern_amplitude=1.0, southern_amplitude=0.0),
+def test_southern_transport_is_the_derived_ekman_section() -> None:
+    output = GlobalAdjustmentModel(
+        model_geometry(), model_forcing(ekman_amplitude=0.1)
     ).solve()
-    southern = GlobalAdjustmentModel(
-        model_geometry(),
-        model_forcing(northern_amplitude=0.0, southern_amplitude=1.0),
-    ).solve()
-
-    np.testing.assert_allclose(southern.spectral.h_e, -northern.spectral.h_e)
+    southern_section = output.spectral.transport_ekman.sel(
+        region="atlantic_pacific_transition"
+    ).dropna("latitude", how="all").isel(latitude=0).reset_coords(drop=True)
+    xr.testing.assert_allclose(output.spectral.T_S, southern_section)
 
 
 def test_rectangular_constant_pumping_anchors_P_F_and_r_signs() -> None:
@@ -350,7 +342,7 @@ def test_rectangular_constant_pumping_anchors_P_F_and_r_signs() -> None:
         dims="time",
         coords={"time": time},
     )
-    M_ek_x = xr.DataArray(
+    M_Ek_x = xr.DataArray(
         np.asarray(pumping)[:, None, None]
         * earth_radius
         * np.cos(np.deg2rad(latitude))[None, :, None]
@@ -359,28 +351,26 @@ def test_rectangular_constant_pumping_anchors_P_F_and_r_signs() -> None:
         coords={"time": time, "latitude": latitude, "longitude": longitude},
         attrs={"units": "m2 s-1"},
     )
-    M_ek_y = xr.zeros_like(M_ek_x)
-    M_ek_y.attrs["units"] = "m2 s-1"
+    M_Ek_y = xr.zeros_like(M_Ek_x)
+    M_Ek_y.attrs["units"] = "m2 s-1"
     zero = xr.DataArray(
         np.zeros(time.size),
         dims="time",
         coords={"time": time},
         attrs={"units": "Sv"},
     )
-    forcing = GlobalForcing.from_time_series(
-        M_ek_x=M_ek_x,
-        M_ek_y=M_ek_y,
-        northern_transport=zero,
-        southern_transport=zero,
-        padding_samples=time.size - 1,
-        n_fft=64,
+    forcing = xr.Dataset(
+        {"M_Ek_x": M_Ek_x, "M_Ek_y": M_Ek_y, "T_N": zero}
     )
-    term = GlobalAdjustmentModel(model_geometry(), forcing)._region_terms(
-        "atlantic_north"
-    ).compute()
+    model = GlobalAdjustmentModel(
+        model_geometry(),
+        forcing,
+        fft=FFTConvention(padding_samples=time.size - 1, n_fft=64),
+    )
+    term = model._region_terms("atlantic_north").compute()
 
     index = 3
-    omega = float(forcing.omega[index])
+    omega = float(model._spectral.omega[index])
     regional_latitude = np.asarray(term.latitude)
     f = 2.0 * rotation_rate * np.sin(np.deg2rad(regional_latitude))
     beta = (
@@ -400,7 +390,7 @@ def test_rectangular_constant_pumping_anchors_P_F_and_r_signs() -> None:
     eastern_phase = np.exp(-1j * omega * width / c)
     y = earth_radius * np.deg2rad(regional_latitude)
     expected_r = np.trapezoid(c * (eastern_phase - 1.0), x=y)
-    pumping_hat = complex(forcing.transform(pumping).isel(omega=index))
+    pumping_hat = complex(model._transform.transform(pumping).isel(omega=index))
     expected_F = np.trapezoid(
         pumping_hat
         * (c / (1j * omega) * (1.0 - eastern_phase) - width),

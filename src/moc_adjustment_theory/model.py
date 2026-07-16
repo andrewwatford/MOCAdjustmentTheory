@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import warnings
 
 import dask.array as dsa
@@ -10,13 +10,10 @@ import numpy as np
 import xarray as xr
 from scipy import integrate
 
-from .forcing import GlobalForcing
+from .constants import EARTH_RADIUS, EARTH_ROTATION_RATE
+from .forcing import FFTConvention, _ResolvedFFT, _normalise_forcing, _resolve_fft
 from .geometry import MultiBasinGeometry, REGION_KEYS
 from .output import GlobalAdjustmentOutput
-
-
-EARTH_RADIUS = 6.371e6
-EARTH_ROTATION_RATE = 7.292115e-5
 
 
 def _coriolis(latitude: np.ndarray | xr.DataArray) -> np.ndarray | xr.DataArray:
@@ -84,21 +81,30 @@ class GlobalAdjustmentModel:
     """Derive Ekman terms and solve the fixed 3 x 3 system at every frequency."""
 
     geometry: MultiBasinGeometry
-    forcing: GlobalForcing
+    forcing: xr.Dataset
+    fft: FFTConvention = field(default_factory=FFTConvention)
     g_prime: float = 0.02
     condition_warning: float = 1e10
+    _time_domain: xr.Dataset = field(init=False, repr=False)
+    _spectral: xr.Dataset = field(init=False, repr=False)
+    _transform: _ResolvedFFT = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.g_prime) or self.g_prime <= 0:
             raise ValueError("g_prime must be positive and finite")
         if not np.isfinite(self.condition_warning) or self.condition_warning <= 1:
             raise ValueError("condition_warning must be finite and greater than one")
+        time_domain = _normalise_forcing(self.forcing)
+        transform = _resolve_fft(self.fft, time_domain.time)
+        object.__setattr__(self, "_time_domain", time_domain)
+        object.__setattr__(self, "_transform", transform)
+        object.__setattr__(self, "_spectral", transform.transform_dataset(time_domain))
 
     def _region_terms(self, region: str) -> xr.Dataset:
         bounds = self.geometry.dataset.sel(region=region)
         south = float(bounds.region_south)
         north = float(bounds.region_north)
-        native_latitude = np.asarray(self.forcing.spectral.latitude, dtype=float)
+        native_latitude = np.asarray(self._spectral.latitude, dtype=float)
         if south < native_latitude[0] or north > native_latitude[-1]:
             raise ValueError(
                 f"Ekman-transport grid does not bracket {region!r} latitude support"
@@ -126,10 +132,10 @@ class GlobalAdjustmentModel:
         center = float(np.median(0.5 * (x_b + x_e)))
 
         transport_x = _continuous_longitude(
-            self.forcing.spectral.M_ek_x, center=center
+            self._spectral.M_Ek_x, center=center
         )
         transport_y = _continuous_longitude(
-            self.forcing.spectral.M_ek_y, center=center
+            self._spectral.M_Ek_y, center=center
         )
         longitude = np.asarray(transport_x.longitude, dtype=float)
         spacing = float(np.median(np.diff(longitude)))
@@ -173,7 +179,7 @@ class GlobalAdjustmentModel:
             * np.deg2rad(longitude[None, :] - x_b[:, None])
         )
         travel_time = distance / c_values[:, None]
-        omega_values = np.asarray(self.forcing.omega, dtype=float)
+        omega_values = np.asarray(self._spectral.omega, dtype=float)
         phase_data = dsa.exp(
             -1j
             * dsa.from_array(
@@ -188,7 +194,7 @@ class GlobalAdjustmentModel:
             phase_data,
             dims=("omega", "latitude", "longitude"),
             coords={
-                "omega": self.forcing.omega,
+                "omega": self._spectral.omega,
                 "latitude": latitude,
                 "longitude": longitude,
             },
@@ -212,7 +218,7 @@ class GlobalAdjustmentModel:
         eastern_phase = xr.DataArray(
             eastern_phase,
             dims=("omega", "latitude"),
-            coords={"omega": self.forcing.omega, "latitude": latitude},
+            coords={"omega": self._spectral.omega, "latitude": latitude},
         )
         storage_density = c * (eastern_phase - 1.0)
         meridional_scale = EARTH_RADIUS * np.pi / 180.0
@@ -256,7 +262,7 @@ class GlobalAdjustmentModel:
             )
             for region in REGION_KEYS
         }
-        omega = np.asarray(self.forcing.omega, dtype=float)
+        omega = np.asarray(self._spectral.omega, dtype=float)
         n_omega = omega.size
         r1, r2, r3, r4, r5 = (
             np.asarray(terms[region].r)
@@ -272,6 +278,11 @@ class GlobalAdjustmentModel:
         y_P = float(
             self.geometry.dataset.region_south.sel(region="pacific_north")
         )
+        y_S = float(
+            self.geometry.dataset.region_south.sel(
+                region="atlantic_pacific_transition"
+            )
+        )
         kappa_I = self.g_prime * self.geometry.H / float(_coriolis(y_I))
         kappa_P = self.g_prime * self.geometry.H / float(_coriolis(y_P))
         transport_I_ekman = np.asarray(
@@ -280,8 +291,12 @@ class GlobalAdjustmentModel:
         transport_P_ekman = np.asarray(
             terms["pacific_north"].transport_ekman.sel(latitude=y_P)
         )
-        northern = np.asarray(self.forcing.spectral.northern_transport.compute())
-        southern = np.asarray(self.forcing.spectral.southern_transport.compute())
+        northern_da = self._spectral.T_N.compute()
+        southern_da = terms[
+            "atlantic_pacific_transition"
+        ].transport_ekman.sel(latitude=y_S).reset_coords(drop=True)
+        northern = np.asarray(northern_da)
+        southern = np.asarray(southern_da)
 
         matrix = np.zeros((n_omega, 3, 3), dtype=np.complex128)
         matrix[:, 0, 0] = r1 + kappa_I
@@ -332,15 +347,15 @@ class GlobalAdjustmentModel:
         h_e = xr.DataArray(
             np.stack([h_by_region[region] for region in REGION_KEYS], axis=1),
             dims=("omega", "region"),
-            coords={"omega": self.forcing.omega, "region": list(REGION_KEYS)},
+            coords={"omega": self._spectral.omega, "region": list(REGION_KEYS)},
             attrs={"units": "m"},
         )
 
         total_profiles: dict[str, xr.DataArray] = {}
         north_transport: dict[str, xr.DataArray] = {
-            "atlantic_north": self.forcing.spectral.northern_transport.compute(),
-            "indian_north": xr.zeros_like(self.forcing.omega, dtype=complex),
-            "pacific_north": xr.zeros_like(self.forcing.omega, dtype=complex),
+            "atlantic_north": northern_da,
+            "indian_north": xr.zeros_like(self._spectral.omega, dtype=complex),
+            "pacific_north": xr.zeros_like(self._spectral.omega, dtype=complex),
         }
         southern_transport: dict[str, xr.DataArray] = {}
 
@@ -351,7 +366,7 @@ class GlobalAdjustmentModel:
             he = xr.DataArray(
                 h_by_region[region],
                 dims="omega",
-                coords={"omega": self.forcing.omega},
+                coords={"omega": self._spectral.omega},
             )
             profile = north_transport[region] + cumulative_F - cumulative_r * he
             total_profiles[region] = profile
@@ -387,7 +402,7 @@ class GlobalAdjustmentModel:
             he = xr.DataArray(
                 h_by_region[region],
                 dims="omega",
-                coords={"omega": self.forcing.omega},
+                coords={"omega": self._spectral.omega},
             )
             h_b = he * term.eastern_phase - term.q / _rossby_speed(
                 np.asarray(latitude), g_prime=self.g_prime, H=self.geometry.H
@@ -430,6 +445,8 @@ class GlobalAdjustmentModel:
                     compatibility_arrays, dim=region_index
                 ).transpose("omega", "region"),
                 "condition_number": ("omega", condition),
+                "T_N": northern_da,
+                "T_S": southern_da,
                 "southern_budget_residual": (
                     "omega",
                     np.asarray(
@@ -439,9 +456,9 @@ class GlobalAdjustmentModel:
                 ),
             }
         )
-        spectral.attrs.update(self.forcing.spectral.attrs)
+        spectral.attrs.update(self._spectral.attrs)
         spectral.attrs["time_mean_removed"] = bool(
-            self.forcing.time_domain.attrs["time_mean_removed"]
+            self._time_domain.attrs["time_mean_removed"]
         )
         for name in ("h_e", "h_b", "h_w"):
             spectral[name].attrs["units"] = "m"
@@ -463,7 +480,7 @@ class GlobalAdjustmentModel:
         )
 
         time_variables = {
-            name: self.forcing.inverse_transform(spectral[name])
+            name: self._transform.inverse_transform(spectral[name])
             for name in (
                 "h_e",
                 "h_b",

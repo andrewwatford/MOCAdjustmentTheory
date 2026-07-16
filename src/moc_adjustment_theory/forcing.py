@@ -1,4 +1,4 @@
-"""Time alignment and Fourier conventions for global model forcing."""
+"""Forcing validation and shared real-Fourier conventions."""
 
 from __future__ import annotations
 
@@ -27,25 +27,30 @@ _TRANSPORT_M3_UNITS = {
     "m3 s**-1",
 }
 _TRANSPORT_SV_UNITS = {"sv", "sverdrup", "sverdrups"}
+_FORCING_VARIABLES = ("M_Ek_x", "M_Ek_y", "T_N")
 
 
 def _unit_text(array: xr.DataArray) -> str:
+    """Return a case- and whitespace-normalised unit string."""
+
     return " ".join(str(array.attrs.get("units", "")).lower().split())
 
 
 def _normalise_ekman_transport(array: xr.DataArray, name: str) -> xr.DataArray:
+    """Validate one vector-transport component and standardise its units."""
+
     if set(array.dims) != {"time", "latitude", "longitude"}:
         raise ValueError(f"{name} must have time, latitude, and longitude dimensions")
     if _unit_text(array) not in _EKMAN_TRANSPORT_UNITS:
         raise ValueError(f"{name} units must be m2 s-1")
     result = array.transpose("time", "latitude", "longitude").astype(float)
-    result.name = name
-    result.attrs = dict(array.attrs)
-    result.attrs["units"] = "m2 s-1"
-    return result
+    result.attrs = {**array.attrs, "units": "m2 s-1"}
+    return result.rename(name)
 
 
 def _normalise_transport(array: xr.DataArray, name: str) -> xr.DataArray:
+    """Convert a one-dimensional volume transport to cubic metres per second."""
+
     if array.dims != ("time",):
         raise ValueError(f"{name} must have only a time dimension")
     units = _unit_text(array)
@@ -55,32 +60,55 @@ def _normalise_transport(array: xr.DataArray, name: str) -> xr.DataArray:
         result = array.astype(float)
     else:
         raise ValueError(f"{name} units must be m3 s-1 or Sv")
-    result.name = name
-    result.attrs = dict(array.attrs)
-    result.attrs["units"] = "m3 s-1"
-    return result
+    result.attrs = {**array.attrs, "units": "m3 s-1"}
+    return result.rename(name)
 
 
-def _validate_grid(M_ek_x: xr.DataArray, M_ek_y: xr.DataArray) -> None:
-    if not M_ek_x.latitude.equals(M_ek_y.latitude) or not M_ek_x.longitude.equals(
-        M_ek_y.longitude
-    ):
-        raise ValueError("M_ek_x and M_ek_y must use the same spatial grid")
+def _normalise_forcing(dataset: xr.Dataset) -> xr.Dataset:
+    """Validate the three-variable forcing dataset and return SI anomalies."""
+
+    if not isinstance(dataset, xr.Dataset):
+        raise TypeError("forcing must be an xarray.Dataset")
+    missing = sorted(set(_FORCING_VARIABLES) - set(dataset.data_vars))
+    extra = sorted(set(dataset.data_vars) - set(_FORCING_VARIABLES))
+    if missing or extra:
+        raise ValueError(
+            "forcing must contain exactly M_Ek_x, M_Ek_y, and T_N; "
+            f"missing={missing}, extra={extra}"
+        )
+    result = xr.Dataset(
+        {
+            "M_Ek_x": _normalise_ekman_transport(dataset.M_Ek_x, "M_Ek_x"),
+            "M_Ek_y": _normalise_ekman_transport(dataset.M_Ek_y, "M_Ek_y"),
+            "T_N": _normalise_transport(dataset.T_N, "T_N"),
+        },
+        attrs=dict(dataset.attrs),
+    )
     for coordinate in ("latitude", "longitude"):
-        values = np.asarray(M_ek_x[coordinate], dtype=float)
+        values = np.asarray(result[coordinate], dtype=float)
         if values.size < 2 or not np.all(np.isfinite(values)):
             raise ValueError(
                 f"Ekman-transport {coordinate} must contain at least two finite values"
             )
         if not np.all(np.diff(values) > 0):
-            raise ValueError(
-                f"Ekman-transport {coordinate} must be strictly increasing"
-            )
+            raise ValueError(f"Ekman-transport {coordinate} must be strictly increasing")
+    contains_missing = compute(
+        *(array.isnull().any() for array in result.data_vars.values())
+    )
+    for name, missing_values in zip(result.data_vars, contains_missing, strict=True):
+        if bool(missing_values):
+            raise ValueError(f"forcing input {name!r} cannot contain missing values")
+    result = result - result.mean("time")
+    result.M_Ek_x.attrs["units"] = "m2 s-1"
+    result.M_Ek_y.attrs["units"] = "m2 s-1"
+    result.T_N.attrs["units"] = "m3 s-1"
+    result.attrs["time_mean_removed"] = True
+    return result
 
 
-def _sample_interval_seconds(
-    time: xr.DataArray, supplied: float | None
-) -> float:
+def _sample_interval_seconds(time: xr.DataArray, supplied: float | None) -> float:
+    """Validate time ordering and determine the transform sample interval."""
+
     values = np.asarray(time)
     if np.issubdtype(values.dtype, np.datetime64):
         difference = np.diff(values.astype("datetime64[ns]")).astype("timedelta64[ns]")
@@ -111,199 +139,94 @@ def _sample_interval_seconds(
 
 
 def _fft_data(data: object, *, n_fft: int, pad: int) -> object:
+    """Reflect-pad one time-leading array and apply an rFFT along time."""
+
     pad_width = [(0, 0)] * np.ndim(data)
     pad_width[0] = (pad, pad)
     if isinstance(data, dsa.Array):
         padded = dsa.pad(data, pad_width, mode="reflect").rechunk({0: -1})
         return dsa.fft.rfft(padded, n=n_fft, axis=0)
-    return np.fft.rfft(np.pad(np.asarray(data), pad_width, mode="reflect"), n=n_fft, axis=0)
+    padded = np.pad(np.asarray(data), pad_width, mode="reflect")
+    return np.fft.rfft(padded, n=n_fft, axis=0)
 
 
 @dataclass(frozen=True, slots=True)
-class GlobalForcing:
-    """Aligned forcing anomalies with one immutable real-FFT convention."""
+class FFTConvention:
+    """User-selected sampling, padding, and real-FFT convention."""
 
-    _time_domain: xr.Dataset
-    _spectral: xr.Dataset
-    _sample_interval_seconds: float
-    _n_fft: int
-    _padding_samples: int
-    _padding_mode: str
+    sample_interval_seconds: float | None = None
+    padding_samples: int | None = None
+    n_fft: int | None = None
+    padding_mode: Literal["reflect"] = "reflect"
 
-    @classmethod
-    def from_time_series(
-        cls,
-        *,
-        M_ek_x: xr.DataArray,
-        M_ek_y: xr.DataArray,
-        northern_transport: xr.DataArray,
-        southern_transport: xr.DataArray,
-        sample_interval_seconds: float | None = None,
-        padding_samples: int | None = None,
-        n_fft: int | None = None,
-        padding_mode: Literal["reflect"] = "reflect",
-    ) -> GlobalForcing:
-        """Build anomaly forcing from Ekman and external total transports.
 
-        Wind-stress conversion, equatorial regularization, and coastal tapering
-        are intentionally upstream choices. The model derives pumping and
-        section transports from these same vector-transport anomalies. Every
-        input time mean is removed before applying the shared transform.
-        """
+def _resolve_fft(convention: FFTConvention, time: xr.DataArray) -> _ResolvedFFT:
+    """Resolve a declarative convention against one forcing time coordinate."""
 
-        if padding_mode != "reflect":
-            raise ValueError("only reflect padding is currently supported")
-        M_ek_x = _normalise_ekman_transport(M_ek_x, "M_ek_x")
-        M_ek_y = _normalise_ekman_transport(M_ek_y, "M_ek_y")
-        northern_transport = _normalise_transport(
-            northern_transport, "northern_transport"
+    if convention.padding_mode != "reflect":
+        raise ValueError("only reflect padding is currently supported")
+    interval = _sample_interval_seconds(time, convention.sample_interval_seconds)
+    sample_count = time.size
+    padding = (
+        sample_count - 1
+        if convention.padding_samples is None
+        else convention.padding_samples
+    )
+    if isinstance(padding, bool) or not isinstance(padding, (int, np.integer)):
+        raise ValueError("padding_samples must be an integer")
+    padding = int(padding)
+    if padding < 0 or padding > sample_count - 1:
+        raise ValueError(
+            "reflect padding_samples must lie between zero and n_time - 1"
         )
-        southern_transport = _normalise_transport(
-            southern_transport, "southern_transport"
-        )
-        M_ek_x, M_ek_y, northern_transport, southern_transport = xr.align(
-            M_ek_x,
-            M_ek_y,
-            northern_transport,
-            southern_transport,
-            join="exact",
-            copy=False,
-        )
-        _validate_grid(M_ek_x, M_ek_y)
-        interval = _sample_interval_seconds(M_ek_x.time, sample_interval_seconds)
-        time_domain = xr.Dataset(
-            {
-                "M_ek_x": M_ek_x,
-                "M_ek_y": M_ek_y,
-                "northern_transport": northern_transport,
-                "southern_transport": southern_transport,
-            }
-        )
-        missing = compute(
-            *(array.isnull().any() for array in time_domain.data_vars.values())
-        )
-        for name, contains_missing in zip(time_domain.data_vars, missing, strict=True):
-            if bool(contains_missing):
-                raise ValueError(f"forcing input {name!r} cannot contain missing values")
-        time_domain = time_domain - time_domain.mean("time")
-        time_domain.M_ek_x.attrs["units"] = "m2 s-1"
-        time_domain.M_ek_y.attrs["units"] = "m2 s-1"
-        time_domain.northern_transport.attrs["units"] = "m3 s-1"
-        time_domain.southern_transport.attrs["units"] = "m3 s-1"
-        time_domain.attrs["time_mean_removed"] = True
+    padded_count = sample_count + 2 * padding
+    n_fft = (
+        next_fast_len(padded_count, real=True)
+        if convention.n_fft is None
+        else convention.n_fft
+    )
+    if isinstance(n_fft, bool) or not isinstance(n_fft, (int, np.integer)):
+        raise ValueError("n_fft must be an integer")
+    n_fft = int(n_fft)
+    if n_fft < padded_count:
+        raise ValueError("n_fft cannot be shorter than the padded record")
+    return _ResolvedFFT(
+        time=time,
+        sample_interval_seconds=interval,
+        padding_samples=padding,
+        n_fft=n_fft,
+        padding_mode=convention.padding_mode,
+    )
 
-        sample_count = time_domain.sizes["time"]
-        if sample_count < 2:
-            raise ValueError("forcing requires at least two time samples")
-        if padding_samples is None:
-            padding_samples = sample_count - 1
-        if isinstance(padding_samples, bool) or not isinstance(
-            padding_samples, (int, np.integer)
-        ):
-            raise ValueError("padding_samples must be an integer")
-        padding_samples = int(padding_samples)
-        if padding_samples < 0 or padding_samples > sample_count - 1:
-            raise ValueError(
-                "reflect padding_samples must lie between zero and n_time - 1"
-            )
-        padded_count = sample_count + 2 * padding_samples
-        if n_fft is None:
-            n_fft = next_fast_len(padded_count, real=True)
-        if isinstance(n_fft, bool) or not isinstance(n_fft, (int, np.integer)):
-            raise ValueError("n_fft must be an integer")
-        n_fft = int(n_fft)
-        if n_fft < padded_count:
-            raise ValueError("n_fft cannot be shorter than the padded record")
 
-        omega = 2.0 * np.pi * np.fft.rfftfreq(n_fft, d=interval)
-        spectra: dict[str, xr.DataArray] = {}
-        for name, array in time_domain.data_vars.items():
-            ordered = array.transpose("time", ...)
-            data = _fft_data(
-                ordered.data,
-                n_fft=n_fft,
-                pad=padding_samples,
-            )
-            coordinates = {
-                "omega": omega,
-                **{
-                    dimension: ordered.coords[dimension]
-                    for dimension in ordered.dims
-                    if dimension != "time"
-                },
-            }
-            spectrum = xr.DataArray(
-                data,
-                dims=("omega", *ordered.dims[1:]),
-                coords=coordinates,
-                name=name,
-                attrs={**array.attrs, "transform": "numpy rfft"},
-            )
-            spectra[name] = spectrum.where(spectrum.omega != 0.0, 0.0)
-        spectral = xr.Dataset(spectra)
-        spectral.omega.attrs.update(
-            units="rad s-1", long_name="non-negative angular frequency"
-        )
-        spectral.attrs.update(
-            n_fft=n_fft,
-            sample_interval_seconds=interval,
-            padding_samples=padding_samples,
-            padding_mode=padding_mode,
-            zero_frequency="set to zero for anomaly forcing",
-        )
-        return cls(
-            time_domain,
-            spectral,
-            interval,
-            n_fft,
-            padding_samples,
-            padding_mode,
-        )
+@dataclass(frozen=True, slots=True)
+class _ResolvedFFT:
+    """Concrete transform associated with one forcing time coordinate."""
 
-    @property
-    def time_domain(self) -> xr.Dataset:
-        """Aligned time-domain anomalies in SI units."""
-
-        return self._time_domain
-
-    @property
-    def spectral(self) -> xr.Dataset:
-        """The matching non-negative-frequency spectra."""
-
-        return self._spectral
-
-    @property
-    def omega(self) -> xr.DataArray:
-        return self._spectral.omega
-
-    @property
-    def sample_interval_seconds(self) -> float:
-        return self._sample_interval_seconds
-
-    @property
-    def n_fft(self) -> int:
-        return self._n_fft
-
-    @property
-    def padding_samples(self) -> int:
-        return self._padding_samples
+    time: xr.DataArray
+    sample_interval_seconds: float
+    padding_samples: int
+    n_fft: int
+    padding_mode: str
 
     def transform(self, array: xr.DataArray) -> xr.DataArray:
-        """Apply this forcing object's FFT convention to another time series."""
+        """Transform one array that uses the resolved time coordinate."""
 
-        if "time" not in array.dims or not array.time.equals(self._time_domain.time):
-            raise ValueError("array must use the forcing object's time coordinate")
+        if "time" not in array.dims or not array.time.equals(self.time):
+            raise ValueError("array must use the forcing time coordinate")
         ordered = array.transpose("time", ...)
-        data = _fft_data(
-            ordered.data,
-            n_fft=self._n_fft,
-            pad=self._padding_samples,
+        omega = 2.0 * np.pi * np.fft.rfftfreq(
+            self.n_fft, d=self.sample_interval_seconds
         )
-        result = xr.DataArray(
-            data,
+        spectrum = xr.DataArray(
+            _fft_data(
+                ordered.data,
+                n_fft=self.n_fft,
+                pad=self.padding_samples,
+            ),
             dims=("omega", *ordered.dims[1:]),
             coords={
-                "omega": self.omega,
+                "omega": omega,
                 **{
                     dimension: ordered.coords[dimension]
                     for dimension in ordered.dims
@@ -313,29 +236,52 @@ class GlobalForcing:
             name=array.name,
             attrs={**array.attrs, "transform": "numpy rfft"},
         )
-        return result.where(result.omega != 0.0, 0.0)
+        spectrum.omega.attrs.update(
+            units="rad s-1", long_name="non-negative angular frequency"
+        )
+        return spectrum.where(spectrum.omega != 0.0, 0.0)
+
+    def transform_dataset(self, dataset: xr.Dataset) -> xr.Dataset:
+        """Transform every time-dependent variable with one shared convention."""
+
+        spectral = xr.Dataset(
+            {name: self.transform(array) for name, array in dataset.data_vars.items()}
+        )
+        spectral.attrs.update(
+            n_fft=self.n_fft,
+            sample_interval_seconds=self.sample_interval_seconds,
+            padding_samples=self.padding_samples,
+            padding_mode=self.padding_mode,
+            zero_frequency="set to zero for anomaly forcing",
+        )
+        return spectral
 
     def inverse_transform(self, spectrum: xr.DataArray) -> xr.DataArray:
         """Apply the matching inverse transform and crop to the source record."""
 
-        if "omega" not in spectrum.dims or not spectrum.omega.equals(self.omega):
-            raise ValueError("spectrum must use the forcing object's omega coordinate")
+        expected_omega = 2.0 * np.pi * np.fft.rfftfreq(
+            self.n_fft, d=self.sample_interval_seconds
+        )
+        if "omega" not in spectrum.dims or not np.array_equal(
+            np.asarray(spectrum.omega), expected_omega
+        ):
+            raise ValueError("spectrum must use the resolved omega coordinate")
         ordered = spectrum.transpose("omega", ...)
-        data = ordered.data
-        if isinstance(data, dsa.Array):
+        if isinstance(ordered.data, dsa.Array):
             transformed = dsa.fft.irfft(
-                data.rechunk({0: -1}), n=self._n_fft, axis=0
+                ordered.data.rechunk({0: -1}), n=self.n_fft, axis=0
             )
         else:
-            transformed = np.fft.irfft(np.asarray(data), n=self._n_fft, axis=0)
-        start = self._padding_samples
-        stop = start + self._time_domain.sizes["time"]
-        cropped = transformed[start:stop]
+            transformed = np.fft.irfft(
+                np.asarray(ordered.data), n=self.n_fft, axis=0
+            )
+        start = self.padding_samples
+        cropped = transformed[start : start + self.time.size]
         return xr.DataArray(
             cropped,
             dims=("time", *ordered.dims[1:]),
             coords={
-                "time": self._time_domain.time,
+                "time": self.time,
                 **{
                     dimension: ordered.coords[dimension]
                     for dimension in ordered.dims

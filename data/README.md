@@ -15,7 +15,6 @@ examples expect these source directory names:
 data/untracked/
 ├── ERA5/
 ├── GEBCO/
-├── OSNAP/
 └── SCOTIA/
 ```
 

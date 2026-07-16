@@ -1,8 +1,8 @@
 """Upstream data preparation and plotting used only by worked notebooks.
 
 These helpers are deliberately outside ``moc_adjustment_theory``.  In
-particular, reference density, wind-stress regularization, and coastal tapering
-are choices made by the notebook author before constructing ``GlobalForcing``.
+particular, reference density and wind-stress regularization are choices made
+by the notebook author before constructing the model forcing.
 """
 
 from __future__ import annotations
@@ -14,32 +14,28 @@ import numpy as np
 import scipy.optimize
 import xarray as xr
 
-from moc_adjustment_theory import MultiBasinGeometry
-
-
-R_EARTH = 6.371e6
-OMEGA = 7.292115e-5
-
-TRACE_VARIABLES = {
-    "atlantic_west": "x_wA",
-    "atlantic_east": "x_eA",
-    "indian_west": "x_wI",
-    "indian_east": "x_eI",
-    "pacific_west": "x_wP",
-    "pacific_east": "x_eP",
-}
+from moc_adjustment_theory import (
+    EARTH_RADIUS,
+    EARTH_ROTATION_RATE,
+    MultiBasinGeometry,
+)
 
 
 def f(latitude: xr.DataArray | np.ndarray | float) -> object:
     """Coriolis parameter in inverse seconds."""
 
-    return 2.0 * OMEGA * np.sin(np.deg2rad(latitude))
+    return 2.0 * EARTH_ROTATION_RATE * np.sin(np.deg2rad(latitude))
 
 
 def beta(latitude: float) -> float:
     """Meridional Coriolis gradient in inverse metres per second."""
 
-    return 2.0 * OMEGA * np.cos(np.deg2rad(latitude)) / R_EARTH
+    return (
+        2.0
+        * EARTH_ROTATION_RATE
+        * np.cos(np.deg2rad(latitude))
+        / EARTH_RADIUS
+    )
 
 
 def regularization_gamma(g_prime: float, H: float) -> float:
@@ -55,196 +51,34 @@ def regularization_gamma(g_prime: float, H: float) -> float:
     return float(f(cap_latitude))
 
 
-def non_itf_geometry(
-    isobaths: xr.Dataset,
-    *,
-    y_S: float,
-    y_P: float,
-    y_I: float,
-    y_N: float,
-    y_NI: float,
-    y_NP: float,
-) -> MultiBasinGeometry:
-    """Construct the explicit five-region, no-throughflow geometry."""
-
-    definitions = {
-        "atlantic_north": {
-            "west": "atlantic_west",
-            "east": "atlantic_east",
-            "south": y_I,
-            "north": y_N,
-        },
-        "indian_north": {
-            "west": "indian_west",
-            "east": "indian_east",
-            "south": y_I,
-            "north": y_NI,
-        },
-        "pacific_north": {
-            "west": "pacific_west",
-            "east": "pacific_east",
-            "south": y_P,
-            "north": y_NP,
-        },
-        "atlantic_indian_transition": {
-            "west": "atlantic_west",
-            "east": "indian_east",
-            "south": y_P,
-            "north": y_I,
-        },
-        "atlantic_pacific_transition": {
-            "west": "atlantic_west",
-            "east": "pacific_east",
-            "south": y_S,
-            "north": y_P,
-        },
-    }
-    return MultiBasinGeometry.from_isobath_dataset(
-        isobaths,
-        trace_variables=TRACE_VARIABLES,
-        region_definitions=definitions,
-    )
-
-
-def smooth_ramp(distance: np.ndarray, width_degrees: float = 2.0) -> np.ndarray:
-    """C-infinity ramp from zero to one over a positive distance."""
-
-    scaled = np.asarray(distance, dtype=float) / width_degrees
-    left = np.zeros_like(scaled)
-    right = np.zeros_like(scaled)
-    positive_left = scaled > 0.0
-    positive_right = (1.0 - scaled) > 0.0
-    left[positive_left] = np.exp(-1.0 / scaled[positive_left])
-    right[positive_right] = np.exp(-1.0 / (1.0 - scaled[positive_right]))
-    transition = (scaled > 0.0) & (scaled < 1.0)
-    result = np.zeros_like(scaled)
-    result[transition] = left[transition] / (
-        left[transition] + right[transition]
-    )
-    result[scaled >= 1.0] = 1.0
-    return result
-
-
-def cyclic_zonal_taper(
-    latitude: np.ndarray,
-    longitude: np.ndarray,
-    west: np.ndarray,
-    east: np.ndarray,
-    *,
-    width_degrees: float,
-) -> xr.DataArray:
-    """Evaluate one basin taper while retaining a unique 0--360 grid."""
-
-    center = float(np.median(0.5 * (west + east)))
-    continuous_longitude = (
-        longitude[None, :] - center + 180.0
-    ) % 360.0 + center - 180.0
-    values = smooth_ramp(
-        continuous_longitude - west[:, None], width_degrees
-    ) * smooth_ramp(east[:, None] - continuous_longitude, width_degrees)
-    return xr.DataArray(
-        values,
-        dims=("latitude", "longitude"),
-        coords={"latitude": latitude, "longitude": longitude},
-    )
-
-
-def non_itf_taper(
-    geometry: MultiBasinGeometry,
-    latitude: xr.DataArray,
-    longitude: xr.DataArray,
-    *,
-    width_degrees: float = 2.0,
-) -> xr.DataArray:
-    """One continuous, no-ITF ocean taper on a supplied forcing grid."""
-
-    lat = np.asarray(latitude, dtype=float)
-    lon = np.asarray(longitude, dtype=float)
-    bounds = geometry.boundaries_on(lat)
-    y_I = float(
-        geometry.dataset.region_south.sel(region="atlantic_north")
-    )
-    y_P = float(
-        geometry.dataset.region_south.sel(region="pacific_north")
-    )
-    taper = xr.DataArray(
-        np.zeros((lat.size, lon.size)),
-        dims=("latitude", "longitude"),
-        coords={"latitude": lat, "longitude": lon},
-    )
-
-    for region, selector in (
-        ("atlantic_north", lat >= y_I),
-        ("atlantic_indian_transition", (lat >= y_P) & (lat < y_I)),
-        ("atlantic_pacific_transition", lat < y_P),
-    ):
-        region_bounds = bounds.sel(region=region)
-        taper.loc[{"latitude": lat[selector]}] += cyclic_zonal_taper(
-            lat[selector],
-            lon,
-            np.asarray(region_bounds.x_b)[selector],
-            np.asarray(region_bounds.x_e)[selector],
-            width_degrees=width_degrees,
-        )
-
-    for region in ("indian_north", "pacific_north"):
-        region_bounds = bounds.sel(region=region)
-        south = float(geometry.dataset.region_south.sel(region=region))
-        north = float(geometry.dataset.region_north.sel(region=region))
-        selector = (lat >= south) & (lat <= north)
-        closed_basin = cyclic_zonal_taper(
-            lat[selector],
-            lon,
-            np.asarray(region_bounds.x_b)[selector],
-            np.asarray(region_bounds.x_e)[selector],
-            width_degrees=width_degrees,
-        )
-        closed_basin = closed_basin * xr.DataArray(
-            smooth_ramp(north - lat[selector], width_degrees),
-            dims="latitude",
-            coords={"latitude": lat[selector]},
-        )
-        taper.loc[{"latitude": lat[selector]}] += closed_basin
-    return taper.clip(max=1.0)
-
-
 def ekman_transport_from_stress(
     stress: xr.Dataset,
-    geometry: MultiBasinGeometry,
     *,
     rho_0: float,
     gamma: float,
-    width_degrees: float = 2.0,
     tau_x: str = "avg_iews",
     tau_y: str = "avg_inss",
 ) -> xr.Dataset:
-    """Apply an explicitly chosen upstream stress-to-transport conversion."""
+    """Convert stress to regularized Ekman transport on the full wind grid."""
 
-    taper = non_itf_taper(
-        geometry,
-        stress.latitude,
-        stress.longitude,
-        width_degrees=width_degrees,
-    )
     inverse_f = f(stress.latitude) / (f(stress.latitude) ** 2 + gamma**2)
     result = xr.Dataset(
         {
-            "M_ek_x": stress[tau_y] * taper * inverse_f / rho_0,
-            "M_ek_y": -stress[tau_x] * taper * inverse_f / rho_0,
+            "M_Ek_x": stress[tau_y] * inverse_f / rho_0,
+            "M_Ek_y": -stress[tau_x] * inverse_f / rho_0,
         }
     )
-    result.M_ek_x.attrs.update(units="m2 s-1", positive="eastward")
-    result.M_ek_y.attrs.update(units="m2 s-1", positive="northward")
+    result.M_Ek_x.attrs.update(units="m2 s-1", positive="eastward")
+    result.M_Ek_y.attrs.update(units="m2 s-1", positive="northward")
     result.attrs.update(
         rho_0_used_upstream=float(rho_0),
         gamma_used_upstream=float(gamma),
-        taper_width_degrees=float(width_degrees),
     )
     return result
 
 
 def section_transport(
-    M_ek_y: xr.DataArray,
+    M_Ek_y: xr.DataArray,
     geometry: MultiBasinGeometry,
     *,
     region: str,
@@ -252,7 +86,7 @@ def section_transport(
 ) -> xr.DataArray:
     """Integrate northward vector transport across one geometry section."""
 
-    section = M_ek_y.interp(latitude=latitude)
+    section = M_Ek_y.interp(latitude=latitude)
     target = np.array([latitude, latitude + 1e-6])
     bounds = geometry.boundaries_on(target).sel(region=region).isel(latitude=0)
     west = float(bounds.x_b)
@@ -270,7 +104,7 @@ def section_transport(
         0.0,
     ).integrate("longitude")
     result = result * (
-        R_EARTH * np.cos(np.deg2rad(latitude)) * np.pi / 180.0
+        EARTH_RADIUS * np.cos(np.deg2rad(latitude)) * np.pi / 180.0
     )
     result.attrs.update(units="m3 s-1", positive="northward")
     return result

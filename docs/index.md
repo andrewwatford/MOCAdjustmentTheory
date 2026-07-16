@@ -1,42 +1,33 @@
 # MOC Adjustment Theory
 
-`moc-adjustment-theory` implements the fixed five-region reduced-gravity model
-of global overturning adjustment. Its public workflow has four objects and one
-solve. The northern Indian and Pacific basins are closed; the model has no
-Indonesian Throughflow connection or transport input.
+The package solves one model: the five-region `GlobalAdjustmentModel`.
 
 ```python
+import xarray as xr
 from moc_adjustment_theory import (
+    FFTConvention,
     GlobalAdjustmentModel,
-    GlobalForcing,
     MultiBasinGeometry,
 )
 
-geometry = MultiBasinGeometry.from_isobath_dataset(
-    isobaths,
-    trace_variables=trace_variables,
-    region_definitions=region_definitions,
+geometry = MultiBasinGeometry.from_isobath_dataset(isobaths)
+forcing = xr.Dataset(
+    {"M_Ek_x": M_Ek_x, "M_Ek_y": M_Ek_y, "T_N": northern_transport}
 )
-
-forcing = GlobalForcing.from_time_series(
-    M_ek_x=M_ek.x,
-    M_ek_y=M_ek.y,
-    northern_transport=northern_transport,
-    southern_transport=southern_transport,
+fft = FFTConvention(
+    sample_interval_seconds=365.25 * 86_400 / 12,
+    n_fft=2_048,
 )
-
-output = GlobalAdjustmentModel(geometry, forcing, g_prime=0.02).solve()
+output = GlobalAdjustmentModel(geometry, forcing, fft=fft).solve()
 ```
 
-The supplied Ekman vector transport is the scientific package boundary. The
-package derives Ekman pumping, all section Ekman transports, the regional
-forcing terms, and the complete time-dependent solution. Conversion from wind
-stress—including reference density, equatorial regularization, and coastal
-tapering—remains an upstream user choice.
+The model derives Ekman pumping and every section transport from the supplied
+vector Ekman transport. The geometry product supplies the integration domain;
+the user does not provide a second region schema or basin mask.
 
-Start with [Geometry](geometry.md) for the compact isobath interface, then see
-the [Core API](core_api.md) and focused
-[model specification](specifications/model_architecture.md).
+Start with [Geometry](geometry.md), then see the [Core API](core_api.md),
+[model specification](specifications/model_architecture.md), and the single
+[ERA5 + SCOTIA worked example](global_era5_scotia.md).
 
 ## Local development
 

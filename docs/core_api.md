@@ -1,70 +1,56 @@
 # Core API
 
-The public workflow has four objects and one solve:
+The model accepts a geometry, one forcing dataset, and an FFT convention:
 
 ```python
-geometry = MultiBasinGeometry.from_isobath_dataset(
-    isobaths,
-    trace_variables=trace_variables,
-    region_definitions=region_definitions,
-)
+import xarray as xr
+from moc_adjustment_theory import FFTConvention, GlobalAdjustmentModel
 
-forcing = GlobalForcing.from_time_series(
-    M_ek_x=ekman_transport.x,
-    M_ek_y=ekman_transport.y,
-    northern_transport=scotia,
-    southern_transport=southern_transport,
+forcing = xr.Dataset(
+    {
+        "M_Ek_x": M_Ek_x,  # (time, latitude, longitude), m2 s-1
+        "M_Ek_y": M_Ek_y,  # (time, latitude, longitude), m2 s-1
+        "T_N": T_N,        # (time,), Sv or m3 s-1
+    }
+)
+fft = FFTConvention(
     sample_interval_seconds=365.25 * 86_400 / 12,
+    padding_samples=T_N.sizes["time"] - 1,
     n_fft=2_048,
 )
-
 output = GlobalAdjustmentModel(
     geometry,
     forcing,
+    fft=fft,
     g_prime=0.02,
 ).solve()
 ```
 
-`GlobalForcing` aligns all four inputs, converts transports to SI units,
-removes their time means, applies the declared reflected padding,
-and creates one immutable `rfft` frequency grid. Internal Indian and Pacific
-Ekman transports are not accepted as inputs; the model derives them from the
-same vector field used for Ekman pumping. Wind-stress conversion, \(\rho_0\),
-equatorial regularization, and coastal tapering are upstream user choices.
-The component signs are eastward and northward; all boundary and output
-transports are positive northward, and positive divergence is upward pumping.
+The model converts `T_N` to SI units, removes the three time means, applies one
+shared `rfft`, solves the \(3\times3\times n_\omega\) system, and applies the
+matching `irfft` and crop. `M_Ek_x` is positive eastward; `M_Ek_y`, `T_N`, and
+all output transports are positive northward.
 
-`GlobalAdjustmentModel.solve()` derives the five regional Ekman terms, solves
-the stack of \(3\times3\) systems, and returns every standard diagnostic in
-one pass. `output.dataset` contains time-domain `h_e`, `h_b`, `h_w`, total
-transport, and its Ekman and geostrophic components. `output.spectral` retains
-the compact frequency-domain solution, \(F_j\), \(r_j\), matrix condition
-numbers, and budget/compatibility residuals.
+The southern boundary condition is derived, not supplied:
 
-Transport at an arbitrary supported latitude is a labelled interpolation:
+\[
+T_S=T_{S,\mathrm{Ek}},
+\]
+
+which states that the geostrophic transport through the external southern
+closure is zero. Internal Indian and Pacific Ekman transports are likewise
+derived from the same `M_Ek_y` field.
+
+`output.dataset` contains time-domain `h_e`, `h_b`, `h_w`, total transport,
+and its Ekman and geostrophic components. `output.spectral` contains the
+compact frequency-domain solution, \(F_j\), \(r_j\), `T_N`, derived `T_S`,
+condition numbers, and budget diagnostics.
+
+Transport at any supported latitude is a labelled interpolation:
 
 ```python
 transport_26n = output.transport_at("atlantic_north", 26.5)
 ```
 
-All transforms back to time use the padding, crop, sampling interval, and
-frequency coordinate owned by the forcing object.
-
-## Reference validation
-
-An opt-in integration test reconstructs the established 2004–2024
-ERA5/SCOTIA Atlantic calculation through this API. It supplies SCOTIA as the
-total northern transport and derives the southern transport from the same
-user-prepared \(M_{\mathrm{Ek}}\) field. Correlations with the legacy result
-exceed 0.99 for \(h_e\), \(h_w\), geostrophic transport, and total transport;
-the Ekman-transport correlation exceeds 0.9999.
-
-```bash
-MOC_REFERENCE_ROOT=/path/to/reference-data python -m pytest -m integration
-```
-
-The legacy \(h_b\) notebook differentiates three independently tapered
-Atlantic sectors, which creates gateway curl sheets absent from one continuous
-vector-transport field. Its regression therefore uses a reviewed, looser
-tolerance for the retained large-scale signal; all other fields retain the
-stricter thresholds above.
+Wind-stress conversion, reference density, and equatorial regularization are
+upstream choices. The package boundary is vector Ekman transport.

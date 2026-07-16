@@ -37,7 +37,6 @@ docs = [
   "mkdocs-material>=9.5",
 ]
 examples = [
-  "amocatlas>=0.3",
   "cmocean>=4",
   "ipykernel>=6",
   "matplotlib>=3.8",
