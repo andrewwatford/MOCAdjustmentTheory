@@ -162,7 +162,10 @@ transform; it must not construct a competing frequency grid.
 The default convention is:
 
 - a common, uniformly sampled time coordinate;
-- real-input `rfft` and non-negative angular frequency
+- NumPy's real-input `rfft` convention,
+  \(\widehat a(\omega)=\int a(t)e^{-i\omega t}\,dt\), so a delay contributes
+  \(e^{-i\omega\tau}\);
+- non-negative angular frequency
   \(\omega=2\pi\,\mathrm{rfftfreq}(n_{\rm fft},\Delta t)\);
 - zero padding sufficient to isolate the retained interval from circular
   wraparound (normally at least \(n-1\) samples on each side);
@@ -191,26 +194,37 @@ Within a region the eastern-boundary signal obeys
 c(y)=\frac{\beta g'H}{f^2},
 \]
 
-with any low-latitude cap on \(c\) recorded as model metadata. For
+with any low-latitude cap on \(c\) recorded as model metadata. Define
 
 \[
-P(x,y,\omega)=
-\exp\!\left[
--\frac{i\omega\,[x_e(y)-x]}{c(y)}
-\right],
+P_j(\omega,x,y)
+=1-\exp\!\left[
+-\frac{i\omega\,[x-x_b^{(j)}(y)]}{c(y)}
+\right].
 \]
 
-define the regional forcing and storage coefficient
+This \(P_j\) is the regional budget kernel, not the characteristic phase
+factor itself. The regional forcing and storage coefficient are
 
 \[
 F_j(\omega)=
-\int_{R_j}P(x,y,\omega)\,
-\widehat w_{\mathrm{Ek}}(x,y,\omega)\,dA,
+-\int_{y_{S,j}}^{y_{N,j}}
+\int_{x_b^{(j)}(y)}^{x_e^{(j)}(y)}
+P_j(\omega,x,y)\,
+\widehat w_{\mathrm{Ek},j}(x,y,\omega)\,dx\,dy,
 \]
 
 \[
 r_j(\omega)=
-i\omega\int_{R_j}P(x,y,\omega)\,dA.
+-\int_{y_{S,j}}^{y_{N,j}}
+c(y)P_j\!\left(\omega,x_e^{(j)}(y),y\right)\,dy.
+\]
+
+These definitions give the thin-western-boundary-current regional budget
+
+\[
+T_{\mathrm{out}}^{(j)}-T_{\mathrm{in}}^{(j)}
+=-F_j+r_jh_e^{(j)}.
 \]
 
 These are implementation details of the global model, not user-supplied
@@ -279,15 +293,20 @@ The notation is physical: \(h_w\) means western-boundary thickness, not
 westward-propagating thickness.
 
 For a latitude \(y\) inside region \(j\), the characteristic solution used for
-\(h_b\) is
+\(h_b\) is kept distinct from the budget kernel:
 
 \[
-\widehat h_b(y,\omega)=
-P(x_b,y,\omega)\widehat h_e^{(j)}(\omega)
-+\int_{x_b}^{x_e}
+\widehat h(x,y,\omega)
+=\widehat h_e^{(j)}(\omega)
+\exp\!\left[\frac{i\omega[x-x_e(y)]}{c(y)}\right]
++\int_{x_e(y)}^x
 \frac{\widehat w_{\mathrm{Ek}}(x',y,\omega)}{c(y)}
-\exp\!\left[-\frac{i\omega(x'-x_b)}{c(y)}\right]dx'.
+\exp\!\left[\frac{i\omega(x-x')}{c(y)}\right]dx',
 \]
+
+with \(\widehat h_b(y,\omega)
+=\widehat h(x_b(y),y,\omega)\). The symbol \(P_j\) above must not be
+substituted for the exponential propagation factor in this solution.
 
 The partial regional budget gives the total transport at any supported
 latitude,
