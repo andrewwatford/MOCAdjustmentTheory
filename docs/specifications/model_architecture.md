@@ -199,7 +199,7 @@ with any low-latitude cap on \(c\) recorded as model metadata. Define
 \[
 P_j(\omega,x,y)
 =\exp\!\left[
--\frac{i\omega\,[x-x_b^{(j)}(y)]}{c(y)}
+\frac{i\omega\,[x_b^{(j)}(y)-x]}{c(y)}
 \right]-1.
 \]
 
