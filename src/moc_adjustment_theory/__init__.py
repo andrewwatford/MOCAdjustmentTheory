@@ -1,6 +1,6 @@
-"""Modular theory of meridional-overturning-circulation adjustment."""
+"""Global meridional-overturning-circulation adjustment theory."""
 
-from .hello import hello_world
+from .geometry import MultiBasinGeometry
 
-__all__ = ["hello_world"]
+__all__ = ["MultiBasinGeometry"]
 __version__ = "0.1.0"

@@ -23,6 +23,7 @@ extra_javascript:
 
 nav:
   - Home: index.md
+  - Geometry: geometry.md
   - Model architecture: specifications/model_architecture.md
 
 strict: true

@@ -41,9 +41,11 @@ algebra and do not need distributed machinery.
 
 ## 3. Multi-basin geometry
 
-`MultiBasinGeometry` is the single description of the domain. It contains both
-the geometric information required for integrations and the directed,
-ordered topology required for the budgets.
+`MultiBasinGeometry` is the single geometric description of the domain. It
+contains the six physical boundary traces, the five region-to-trace mappings
+and latitude bounds, and the shared active-layer/isobath depth `H`. The fixed
+budget ordering belongs to `GlobalAdjustmentModel`, not to a configurable
+topology object.
 
 The five regions are:
 
@@ -58,18 +60,17 @@ The five regions are:
 The theory stops at \(y_S\), near the southern tip of South America. It does
 not model the Southern Ocean as an additional connected basin.
 
-The ordered children are fixed by the derivation:
+All geographic choices used to construct this object are explicit arguments:
+basin longitude windows and seeds, every northern and southern region bound,
+closure paths, and ignored features. The bathymetry extractor contains no
+named-ocean coordinates and does not infer scientific closure latitudes from
+the connected-component result.
 
-```text
-region 5 -> [region 3, region 4]
-region 4 -> [region 2, region 1]
-```
-
-Changing child order changes the algebra and must therefore be explicit and
-validated. The geometry also records boundary curves, latitude coordinates,
-region masks, integration weights, and the locations \(x_e(y)\) and \(x_b(y)\).
-Here \(x_b\) is just outside the western boundary-current region; it is not the
-western coastline.
+The geometry records boundary curves, latitude coordinates, and the locations
+\(x_e(y)\) and \(x_b(y)\). Here \(x_b\) is just outside the western
+boundary-current region; it is not the western coastline. Region masks and
+metric weights depend on the forcing grid and are derived by the model rather
+than stored in the bathymetry geometry.
 
 The eastern-boundary thickness has only three independent values:
 
@@ -335,8 +336,13 @@ they are not a separate public result type.
 
 ```python
 geometry = MultiBasinGeometry.from_bathymetry(
-  bathymetry.
-  H=1_000.0
+    elevation,
+    H=1_000.0,
+    basin_definitions=basin_definitions,
+    region_definitions=region_definitions,
+    closures=closure_paths,
+    ignored_features=ignored_features,
+    extraction_options=extraction_options,
 )
 
 forcing = GlobalForcing.from_time_series(
@@ -358,7 +364,7 @@ atlantic_transport = output.transport.sel(region="atlantic_north")
 
 The exact constructors may evolve, but the ownership boundaries may not:
 
-- Geometry owns boundaries, ordered connectivity, and boundary sharing;
+- geometry owns boundary traces, region bounds, boundary sharing, and `H`;
 - forcing owns input preprocessing and Fourier conventions;
 - the model owns derivation of \(F_j\), \(r_j\), the global solve, and all
   diagnostics; and
@@ -368,8 +374,8 @@ The exact constructors may evolve, but the ownership boundaries may not:
 
 The implementation should fail early when:
 
-- the geometry does not contain the five required regions and child order;
-- a boundary curve, mask, integration weight, \(x_e\), or \(x_b\) is missing;
+- the geometry does not contain the five required regions and trace mappings;
+- a boundary curve, \(x_e\), or \(x_b\) is missing;
 - forcing time axes, units, or anomaly conventions disagree;
 - the forcing frequency grid is incompatible with the requested model; or
 - a derived array contains non-finite values outside a declared masked band.
