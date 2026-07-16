@@ -128,6 +128,8 @@ def _assemble_dataset(
         for definition in regions.values()
         for side in ("west", "east")
     }
+    if len(referenced) != 6:
+        raise ValueError("the fixed geometry requires six distinct boundary traces")
     if trace_names != referenced:
         raise ValueError(
             "trace data must contain exactly the traces referenced by regions"

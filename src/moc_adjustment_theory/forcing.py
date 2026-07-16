@@ -139,16 +139,16 @@ class GlobalForcing:
         northern_transport: xr.DataArray,
         southern_transport: xr.DataArray,
         sample_interval_seconds: float | None = None,
-        remove_time_mean: bool = True,
         padding_samples: int | None = None,
         n_fft: int | None = None,
         padding_mode: Literal["reflect"] = "reflect",
     ) -> GlobalForcing:
-        """Build forcing from Ekman transports and external total transports.
+        """Build anomaly forcing from Ekman and external total transports.
 
         Wind-stress conversion, equatorial regularization, and coastal tapering
         are intentionally upstream choices. The model derives pumping and
-        section transports from these same vector-transport anomalies.
+        section transports from these same vector-transport anomalies. Every
+        input time mean is removed before applying the shared transform.
         """
 
         if padding_mode != "reflect":
@@ -185,13 +185,12 @@ class GlobalForcing:
         for name, contains_missing in zip(time_domain.data_vars, missing, strict=True):
             if bool(contains_missing):
                 raise ValueError(f"forcing input {name!r} cannot contain missing values")
-        if remove_time_mean:
-            time_domain = time_domain - time_domain.mean("time")
+        time_domain = time_domain - time_domain.mean("time")
         time_domain.M_ek_x.attrs["units"] = "m2 s-1"
         time_domain.M_ek_y.attrs["units"] = "m2 s-1"
         time_domain.northern_transport.attrs["units"] = "m3 s-1"
         time_domain.southern_transport.attrs["units"] = "m3 s-1"
-        time_domain.attrs["time_mean_removed"] = bool(remove_time_mean)
+        time_domain.attrs["time_mean_removed"] = True
 
         sample_count = time_domain.sizes["time"]
         if sample_count < 2:

@@ -86,10 +86,12 @@ def model_forcing(
     ekman_amplitude: float = 0.0,
     northern_amplitude: float = 1.0,
     southern_amplitude: float = 0.0,
+    grid_spacing: float = 5.0,
+    zonal_fraction: float = 0.2,
 ) -> GlobalForcing:
     time = np.arange("2001-01-01", "2001-01-13", dtype="datetime64[D]")
-    latitude = np.arange(-60.0, 66.0, 5.0)
-    longitude = np.arange(0.0, 360.0, 5.0)
+    latitude = np.arange(-60.0, 65.0 + 0.5 * grid_spacing, grid_spacing)
+    longitude = np.arange(0.0, 360.0, grid_spacing)
     phase = 2.0 * np.pi * np.arange(time.size) / time.size
     spatial = (
         np.cos(np.deg2rad(latitude))[None, :, None]
@@ -104,7 +106,7 @@ def model_forcing(
     )
     zonal_structure = np.sin(np.deg2rad(longitude))[None, None, :]
     M_ek_x = xr.DataArray(
-        0.2
+        zonal_fraction
         * ekman_amplitude
         * temporal
         * np.cos(np.deg2rad(latitude))[None, :, None]
@@ -218,6 +220,30 @@ def test_vector_transport_is_derived_into_ekman_and_geostrophic_components() -> 
         / (0.02 * 1000.0)
     )
     xr.testing.assert_allclose(output.h_w, relation)
+
+
+def test_compatibility_residual_converges_with_grid_refinement() -> None:
+    geometry = model_geometry()
+    coarse = GlobalAdjustmentModel(
+        geometry,
+        model_forcing(
+            ekman_amplitude=0.1,
+            grid_spacing=5.0,
+            zonal_fraction=0.0,
+        ),
+    ).solve()
+    fine = GlobalAdjustmentModel(
+        geometry,
+        model_forcing(
+            ekman_amplitude=0.1,
+            grid_spacing=2.5,
+            zonal_fraction=0.0,
+        ),
+    ).solve()
+
+    coarse_error = float(abs(coarse.spectral.compatibility_residual).max())
+    fine_error = float(abs(fine.spectral.compatibility_residual).max())
+    assert fine_error < coarse_error
 
 
 def test_vectorized_solution_matches_one_direct_frequency_solve() -> None:

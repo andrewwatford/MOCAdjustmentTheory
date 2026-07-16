@@ -152,6 +152,21 @@ def test_fixed_region_stitching_is_validated() -> None:
         )
 
 
+def test_six_boundary_roles_must_be_distinct() -> None:
+    trace_variables = dict(TRACE_VARIABLES)
+    trace_variables.pop("indian_east")
+    regions = {key: dict(value) for key, value in REGIONS.items()}
+    regions["indian_north"]["east"] = "atlantic_east"
+    regions["atlantic_indian_transition"]["east"] = "atlantic_east"
+
+    with pytest.raises(ValueError, match="six distinct"):
+        MultiBasinGeometry.from_isobath_dataset(
+            in_memory_isobaths(),
+            trace_variables=trace_variables,
+            region_definitions=regions,
+        )
+
+
 def test_isobath_depth_cannot_be_relabelled() -> None:
     with pytest.raises(ValueError, match="conflicts"):
         MultiBasinGeometry.from_isobath_dataset(

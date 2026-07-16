@@ -2,7 +2,8 @@
 
 `moc-adjustment-theory` implements the fixed five-region reduced-gravity model
 of global overturning adjustment. Its public workflow has four objects and one
-solve:
+solve. The northern Indian and Pacific basins are closed; the model has no
+Indonesian Throughflow connection or transport input.
 
 ```python
 from moc_adjustment_theory import (

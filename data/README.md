@@ -8,13 +8,14 @@ distribution:
 - `untracked/` contains large source datasets held only on the local
   filesystem. Its contents are ignored by Git apart from `.gitkeep`.
 
-The initial local inputs are copied from the sibling `atlantic_adjustment`
-checkout and retain their source directory names:
+Set `MOC_EXAMPLE_DATA_ROOT` to the `data/untracked/` directory. The worked
+examples expect these source directory names:
 
 ```text
 data/untracked/
 ├── ERA5/
 ├── GEBCO/
+├── OSNAP/
 └── SCOTIA/
 ```
 

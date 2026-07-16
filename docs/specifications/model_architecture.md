@@ -38,7 +38,7 @@ algebra and do not need distributed machinery.
 ## 3. Multi-basin geometry
 
 `MultiBasinGeometry` is the single geometric description of the domain. It
-contains the six physical boundary traces, the five region-to-trace mappings
+contains six distinct physical boundary traces, the five region-to-trace mappings
 and latitude bounds, and the shared active-layer/isobath depth `H`. The fixed
 budget ordering belongs to `GlobalAdjustmentModel`, not to a configurable
 topology object.
@@ -55,6 +55,8 @@ The five regions are:
 
 The theory stops at \(y_S\), near the southern tip of South America. It does
 not model the Southern Ocean as an additional connected basin.
+There is no direct Indian–Pacific connection: Indonesian Throughflow transport
+is neither a forcing nor a state variable in this framework.
 
 The package loads a compact six-trace isobath product. Variable mappings and
 every northern and southern region bound are explicit arguments. Producing
