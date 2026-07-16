@@ -187,34 +187,6 @@ wind-driven and is obtained by integrating $M_{\mathrm{Ek},y}$ across the
 southern latitude. Ekman upwelling is the divergence of the Ekman transport,
 $w_{\mathrm{Ek}}=\nabla\mathbin{\cdot}\mathbf{M}_{\mathrm{Ek}}$.
 
-### Fourier transforms
-
-`forward_transform` and `inverse_transform` apply one stateless Fourier
-contract to `xarray.DataArray` objects. The forward transform uses NumPy's real
-FFT convention, angular frequency in rad/s, and causal right-zero-padding to
-twice the input length. It requires a strictly increasing, uniformly spaced
-`datetime64` time coordinate and rejects non-finite values.
-
-The numerical contract is explicit in the function arguments. Its defaults
-are `time_dim="time"`, `omega_dim="omega"`, `pad_factor=2`,
-`norm="backward"`, `require_zero_mean=True`, and
-`zero_mean_rtol=1e-7`. The zero-mean tolerance is relative to the field-wide
-maximum absolute amplitude; pass `require_zero_mean=False` to retain a real
-nonzero DC component. The inverse additionally exposes
-`imaginary_rtol=1e-12`, restores the original time coordinate, removes the
-right padding, and rejects DC or Nyquist components inconsistent with a real
-time series.
-
-```python
-from moc_adjustment_theory import forward_transform, inverse_transform
-
-forcing_omega = forward_transform(forcing)
-forcing_time = inverse_transform(forcing_omega)
-```
-
-The planned `GlobalAdjustmentModel.solve()` integration will expose and pass
-the same contract arguments; that integration is not implemented yet.
-
 ### Output dataset
 
 The output dataset contains:
