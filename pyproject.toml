@@ -21,6 +21,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
+  "dask[array]>=2024.1",
   "numpy>=1.26",
   "scipy>=1.11",
   "xarray>=2024.1",
