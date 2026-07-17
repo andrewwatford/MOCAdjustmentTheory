@@ -1,4 +1,4 @@
-"""Frequency-domain global Rossby model."""
+"""Global Rossby-wave adjustment model."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import numpy as np
 import xarray as xr
 
 from .fourier import (
-    FFTNorm,
     _METADATA_KEY,
+    _validated_time,
     forward_transform,
     inverse_transform,
 )
@@ -38,6 +38,11 @@ class GlobalRossbyModel:
     g_prime
         Reduced gravity in m s-2.
 
+    Attributes
+    ----------
+    longest_crossing_time_seconds
+        Longest zonal Rossby-wave crossing time across the model geometry.
+
     Notes
     -----
     `solve` is the complete temporal interface. It uses the module-level
@@ -58,15 +63,14 @@ class GlobalRossbyModel:
             raise ValueError("g_prime must be positive")
         self.isobath_ds = isobath_ds
         self.g_prime = float(g_prime)
+        self.longest_crossing_time_seconds = self._longest_crossing_time()
 
     def solve(
         self,
         forcing_ds: xr.Dataset,
         *,
         time_dim: str = "time",
-        omega_dim: str = "omega",
-        pad_factor: int = 2,
-        norm: FFTNorm = "backward",
+        pad_length: int | None = None,
         require_zero_mean: bool = True,
         zero_mean_rtol: float = 1e-7,
         imaginary_rtol: float = 1e-12,
@@ -81,7 +85,10 @@ class GlobalRossbyModel:
         interval when increasing calendar labels are not uniformly separated;
         monthly forcing in this project uses ``365.25 / 12`` days. All other
         transform arguments are forwarded unchanged to the paired Fourier
-        functions.
+        functions. With ``pad_length=None``, the model appends enough zero
+        samples to cover its longest Rossby-wave crossing time and makes the
+        complete FFT length odd. An explicit ``pad_length`` is the minimum
+        number of zero samples appended and overrides that physical default.
 
         Parameters
         ----------
@@ -89,10 +96,14 @@ class GlobalRossbyModel:
             Temporal Ekman transports and northern transport on a shared time
             coordinate. ``T_N`` must have a numeric
             ``latitude_degrees_north`` attribute specifying its boundary.
-        time_dim, omega_dim
-            Temporal and angular-frequency dimension names.
-        pad_factor, norm
-            Causal right-padding factor and NumPy FFT normalization.
+        time_dim
+            Temporal dimension name. Angular frequency is always the internal
+            ``omega`` dimension in rad s-1.
+        pad_length
+            Minimum number of right-padding samples. With ``None``, use at
+            least the longest model crossing time in units of the forcing time
+            step. One additional sample is used when needed to make the full
+            FFT length odd.
         require_zero_mean, zero_mean_rtol
             Whether to enforce forcing anomalies and the field-scale relative
             tolerance used before projecting accepted DC residuals to zero.
@@ -116,11 +127,17 @@ class GlobalRossbyModel:
             )
         self._northern_boundary_latitude(forcing_ds["T_N"])
 
+        if pad_length is None:
+            _, dt_seconds = _validated_time(
+                forcing_ds["T_N"], time_dim, sample_spacing_seconds
+            )
+            pad_length = int(
+                np.ceil(self.longest_crossing_time_seconds / dt_seconds)
+            )
+
         transform_options = {
             "time_dim": time_dim,
-            "omega_dim": omega_dim,
-            "pad_factor": pad_factor,
-            "norm": norm,
+            "pad_length": pad_length,
             "sample_spacing_seconds": sample_spacing_seconds,
         }
         forcing_hat = xr.Dataset(
@@ -135,14 +152,7 @@ class GlobalRossbyModel:
             }
         )
 
-        kernel_forcing = (
-            forcing_hat
-            if omega_dim == "omega"
-            else forcing_hat.rename({omega_dim: "omega"})
-        )
-        solution_hat = self.solve_frequency(kernel_forcing)
-        if omega_dim != "omega":
-            solution_hat = solution_hat.rename({"omega": omega_dim})
+        solution_hat = self.solve_frequency(forcing_hat)
 
         metadata = forcing_hat["T_N"].attrs[_METADATA_KEY]
         solution = {}
@@ -150,8 +160,8 @@ class GlobalRossbyModel:
             spectrum = spectrum.copy(deep=False)
             spectrum.attrs = dict(spectrum.attrs)
             spectrum.attrs[_METADATA_KEY] = metadata
-            masked = spectrum.isnull().all(omega_dim)
-            partially_missing = spectrum.isnull().any(omega_dim) & ~masked
+            masked = spectrum.isnull().all("omega")
+            partially_missing = spectrum.isnull().any("omega") & ~masked
             if bool(partially_missing.any()):
                 raise ValueError(
                     f"{name} has missing values within an active spectrum"
@@ -159,7 +169,6 @@ class GlobalRossbyModel:
             restored = inverse_transform(
                 spectrum.fillna(0.0),
                 imaginary_rtol=imaginary_rtol,
-                **transform_options,
             )
             solution[name] = restored.where(~masked)
 
@@ -205,16 +214,9 @@ class GlobalRossbyModel:
         lon_rad = np.deg2rad(longitude)
         cos_lat = np.cos(lat_rad)
         f = 2.0 * EARTH_ROTATION_S * np.sin(lat_rad)
-        beta = 2.0 * EARTH_ROTATION_S * cos_lat / EARTH_RADIUS_M
         depth = float(self.isobath_ds.attrs["isobath_depth_m"])
         gh = self.g_prime * depth
-        long_wave = np.divide(
-            beta * gh,
-            f * f,
-            out=np.full_like(f, np.inf),
-            where=f != 0,
-        )
-        c = np.minimum(long_wave, np.sqrt(gh) / 3.0)
+        c = _rossby_speed(latitude, self.g_prime, depth)
 
         dmx_dlon = np.gradient(mx, lon_rad, axis=2, edge_order=2)
         dmycos_dlat = np.gradient(my * cos_lat[None, :, None], lat_rad, axis=1, edge_order=2)
@@ -369,6 +371,67 @@ class GlobalRossbyModel:
             raise ValueError("T_N latitude must not fall south of the equator")
         return value
 
+    def _longest_crossing_time(self) -> float:
+        """Return the longest zonal Rossby-wave transit in the geometry."""
+        latitude = np.asarray(self.isobath_ds.latitude.values, dtype=float)
+        if (
+            latitude.ndim != 1
+            or latitude.size < 2
+            or not np.all(np.isfinite(latitude))
+            or np.any(np.diff(latitude) <= 0)
+            or np.any(np.abs(latitude) > 90.0)
+        ):
+            raise ValueError("isobath latitude must be finite and increasing")
+        depth = float(self.isobath_ds.attrs["isobath_depth_m"])
+        if not np.isfinite(depth) or depth <= 0:
+            raise ValueError("isobath_depth_m must be positive")
+        speed = _rossby_speed(latitude, self.g_prime, depth)
+        zonal_scale = EARTH_RADIUS_M * np.cos(np.deg2rad(latitude))
+        boundaries = {}
+        support = {}
+        for name in {item for _, west, east in _REGIONS for item in (west, east)}:
+            if self.isobath_ds[name].dims != ("latitude",):
+                raise ValueError("isobath boundaries must depend only on latitude")
+            values = np.asarray(self.isobath_ds[name].values, dtype=float)
+            valid = np.flatnonzero(np.isfinite(values))
+            if valid.size == 0 or np.any(np.diff(valid) != 1):
+                raise ValueError(f"{name} must have one contiguous finite segment")
+            boundaries[name] = values
+            support[name] = (latitude[valid[0]], latitude[valid[-1]])
+        y_s = max(support["x_wA"][0], support["x_eP"][0])
+        y_p = max(support["x_wP"][0], support["x_eI"][0])
+        y_i = max(support["x_eA"][0], support["x_wI"][0])
+        limits = (
+            (y_i, min(support["x_wA"][1], support["x_eA"][1])),
+            (y_i, min(support["x_wI"][1], support["x_eI"][1])),
+            (y_p, min(support["x_wP"][1], support["x_eP"][1])),
+            (y_p, y_i),
+            (y_s, y_p),
+        )
+        longest = 0.0
+        for (region, west, east), (south, north) in zip(_REGIONS, limits):
+            x_w = boundaries[west]
+            x_e = boundaries[east]
+            valid = (
+                np.isfinite(x_w)
+                & np.isfinite(x_e)
+                & (latitude >= south)
+                & (latitude <= north)
+                & (speed > 0.0)
+            )
+            if not np.any(valid):
+                raise ValueError(f"isobath geometry does not resolve {region}")
+            width = x_e[valid] - x_w[valid]
+            if np.any(width <= 0.0):
+                raise ValueError(
+                    "each eastern boundary must lie east of its western boundary"
+                )
+            crossing = (
+                zonal_scale[valid] * np.deg2rad(width) / speed[valid]
+            )
+            longest = max(longest, float(np.max(crossing)))
+        return longest
+
     def _geometry(self, latitude: np.ndarray, atlantic_north: float):
         """Interpolate boundaries and infer the five contiguous region supports."""
         source_lat = np.asarray(self.isobath_ds.latitude.values, dtype=float)
@@ -494,3 +557,22 @@ def _integral_to_north(values: np.ndarray, coordinate: np.ndarray) -> np.ndarray
     increments = 0.5 * (values[:, :-1] + values[:, 1:]) * np.diff(coordinate)[None, :]
     result[:, :-1] = np.cumsum(increments[:, ::-1], axis=1)[:, ::-1]
     return result
+
+
+def _rossby_speed(
+    latitude: np.ndarray, g_prime: float, depth: float
+) -> np.ndarray:
+    """Return the capped first-mode long Rossby-wave speed in m s-1."""
+    latitude_rad = np.deg2rad(latitude)
+    f = 2.0 * EARTH_ROTATION_S * np.sin(latitude_rad)
+    beta = (
+        2.0 * EARTH_ROTATION_S * np.cos(latitude_rad) / EARTH_RADIUS_M
+    )
+    gh = g_prime * depth
+    long_wave = np.divide(
+        beta * gh,
+        f * f,
+        out=np.full_like(f, np.inf),
+        where=f != 0,
+    )
+    return np.minimum(long_wave, np.sqrt(gh) / 3.0)

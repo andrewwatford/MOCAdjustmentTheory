@@ -17,7 +17,8 @@ The user workflow is:
 Users provide the forcing and isobath datasets, and the model returns another
 dataset. The Fourier interface is the stateless `forward_transform` and
 `inverse_transform` function pair. `GlobalRossbyModel.solve()` applies that
-pair consistently around the frequency-space model.
+pair consistently around the frequency-space model. `butterworth_filter`
+provides a zero-phase low-pass filter for time-dependent `xarray` data.
 
 ## Theory
 
@@ -164,6 +165,34 @@ model = GlobalRossbyModel(
 )
 solution_ds = model.solve(forcing_ds)
 ```
+
+By default, `solve(pad_length=None)` computes the longest zonal Rossby-wave
+crossing time from the supplied geometry, active-layer depth, and reduced
+gravity. It converts that duration to forcing time steps and appends at least
+that many zero samples. The complete FFT length is made odd to avoid a
+self-conjugate Nyquist coefficient when the model applies complex propagation
+phases. An integer `pad_length` overrides the physical default and specifies
+the minimum number of zero samples to append.
+
+Angular frequency is always represented internally by `omega` in rad s$^{-1}$,
+and the paired transforms use one fixed normalization. Neither convention is a
+`solve()` option because changing either consistently would not change the
+time-domain solution. The zero-mean requirement remains configurable because
+it is a scientific constraint on the forcing rather than a representation
+choice.
+
+The standalone `forward_transform` uses the same causal right-padding and odd
+total-length convention. Its `pad_length` defaults to zero because a stateless
+transform has no model geometry from which to infer a crossing time;
+`inverse_transform` reads the complete transform contract from the spectrum's
+metadata.
+
+For low-pass filtering, `butterworth_filter(data, cutoff_omega, order=4)`
+accepts either a `DataArray` or `Dataset`. The cutoff is the half-power angular
+frequency in rad s$^{-1}$. Numeric variables containing the selected time
+dimension are filtered, while other dataset variables and complete-series
+spatial masks are preserved. The zero-phase frequency response assumes that
+the endpoints of each series are periodic.
 
 ### Active-layer dataset
 
