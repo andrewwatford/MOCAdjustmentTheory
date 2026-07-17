@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from numbers import Real
+from typing import NamedTuple
 
 import numpy as np
 import xarray as xr
 
 from .fourier import (
     _METADATA_KEY,
+    _validate_real_finite,
+    _validate_zero_mean,
     _validated_time,
     forward_transform,
     inverse_transform,
@@ -25,6 +28,17 @@ _REGIONS = (
     ("atlantic_indian", "x_wA", "x_eI"),
     ("atlantic_pacific", "x_wA", "x_eP"),
 )
+
+
+class _ZonalRule(NamedTuple):
+    """Precomputed interpolation and integration data for one latitude."""
+
+    latitude_index: int
+    interior: slice
+    west: tuple[int, int, float]
+    east: tuple[int, int, float]
+    x: np.ndarray
+    weights: np.ndarray
 
 
 class GlobalRossbyModel:
@@ -45,9 +59,8 @@ class GlobalRossbyModel:
 
     Notes
     -----
-    `solve` is the complete temporal interface. It uses the module-level
-    Fourier functions around `solve_frequency`, the independently testable
-    frequency-domain kernel.
+    `solve` is the complete temporal interface. Frequency-space operations
+    are an internal implementation detail.
     """
 
     def __init__(self, isobath_ds: xr.Dataset, g_prime: float):
@@ -79,9 +92,9 @@ class GlobalRossbyModel:
         """Solve temporal forcing and return temporal model diagnostics.
 
         The three forcing variables ``M_Ek_x``, ``M_Ek_y`` and ``T_N`` are
-        transformed with one explicit contract, passed through
-        `solve_frequency`, and inverse transformed onto their original
-        time coordinate. ``sample_spacing_seconds`` supplies a physical sample
+        combined into Ekman diagnostics, transformed with one explicit
+        contract, and inverse transformed onto their original time coordinate.
+        ``sample_spacing_seconds`` supplies a physical sample
         interval when increasing calendar labels are not uniformly separated;
         monthly forcing in this project uses ``365.25 / 12`` days. All other
         transform arguments are forwarded unchanged to the paired Fourier
@@ -140,21 +153,81 @@ class GlobalRossbyModel:
             "pad_length": pad_length,
             "sample_spacing_seconds": sample_spacing_seconds,
         }
-        forcing_hat = xr.Dataset(
-            {
-                name: forward_transform(
-                    forcing_ds[name],
-                    require_zero_mean=require_zero_mean,
-                    zero_mean_rtol=zero_mean_rtol,
-                    **transform_options,
-                )
-                for name in required
-            }
+        t_n_hat = forward_transform(
+            forcing_ds["T_N"],
+            require_zero_mean=require_zero_mean,
+            zero_mean_rtol=zero_mean_rtol,
+            **transform_options,
         )
 
-        solution_hat = self.solve_frequency(forcing_hat)
+        latitude, longitude, mx, my = self._temporal_wind_arrays(
+            forcing_ds,
+            time_dim,
+            require_zero_mean,
+            zero_mean_rtol,
+        )
+        geometry = self._geometry(
+            latitude, self._northern_boundary_latitude(t_n_hat)
+        )
+        quadrature = self._zonal_quadrature(
+            longitude, latitude, geometry
+        )
+        # These spatial linear operations commute with the temporal FFT.
+        w_ek = self._ekman_curl(mx, my, latitude, longitude)
+        t_ek = self._regional_ekman_transport(
+            my, quadrature, latitude.size
+        )
 
-        metadata = forcing_hat["T_N"].attrs[_METADATA_KEY]
+        common_coords = {
+            time_dim: forcing_ds[time_dim],
+            "latitude": forcing_ds["latitude"],
+        }
+        w_ek_array = xr.DataArray(
+            w_ek,
+            dims=(time_dim, "latitude", "longitude"),
+            coords={**common_coords, "longitude": forcing_ds["longitude"]},
+            name="w_Ek",
+        )
+        t_ek_array = xr.DataArray(
+            t_ek,
+            dims=(time_dim, "region", "latitude"),
+            coords={
+                **common_coords,
+                "region": [name for name, _, _ in _REGIONS],
+            },
+            name="T_Ek",
+        )
+        w_ek_hat = forward_transform(
+            w_ek_array,
+            require_zero_mean=False,
+            **transform_options,
+        )
+        t_ek_hat = forward_transform(
+            t_ek_array,
+            require_zero_mean=False,
+            **transform_options,
+        )
+        if require_zero_mean:
+            w_ek_hat.data[0] = 0.0
+            t_ek_hat.data[0] = 0.0
+
+        solution_hat = self._solve_from_ekman(
+            np.asarray(w_ek_hat.omega.values, dtype=float),
+            latitude,
+            np.asarray(
+                w_ek_hat.transpose("omega", "latitude", "longitude").values
+            ),
+            np.asarray(
+                t_ek_hat.transpose("omega", "region", "latitude").values
+            ),
+            np.asarray(t_n_hat.transpose("omega").values, dtype=complex),
+            geometry,
+            quadrature,
+            w_ek_hat.omega,
+            w_ek_hat.latitude,
+        )
+
+        metadata = t_n_hat.attrs[_METADATA_KEY]
         solution = {}
         for name, spectrum in solution_hat.data_vars.items():
             spectrum = spectrum.copy(deep=False)
@@ -183,46 +256,49 @@ class GlobalRossbyModel:
         )
         return result
 
-    def solve_frequency(self, forcing_hat: xr.Dataset) -> xr.Dataset:
-        """Solve for spectral thickness and transport anomalies.
-
-        ``forcing_hat`` must contain complex Fourier coefficients ``M_Ek_x``
-        and ``M_Ek_y`` on ``(omega, latitude, longitude)`` and ``T_N`` on
-        ``omega``. ``T_N`` must carry its prescribed boundary latitude in the
-        numeric ``latitude_degrees_north`` attribute. Coordinate values are
-        angular frequencies in rad s-1. A zero-frequency coefficient may be
-        present, but its forcing must vanish. At zero frequency the equations
-        determine thickness differences between oceans, but not a common
-        additive thickness offset. The solver chooses that offset to be zero,
-        making ``h_e`` zero-mean over the full padded transform interval.
-        The temporal ``solve`` interface then crops the inverse transform to
-        its original time coordinate, where the returned series can have a
-        nonzero sample mean.
-
-        Returns
-        -------
-        xarray.Dataset
-            ``h_e`` on ``(omega, region)`` and ``h_b``, ``h_w``, ``T``,
-            ``T_g`` and ``T_Ek`` on ``(omega, region, latitude)``. Values
-            outside a region's latitude support are NaN.
-        """
+    def _solve_frequency(self, forcing_hat: xr.Dataset) -> xr.Dataset:
+        """Run the internal frequency-space compatibility path."""
         omega, latitude, longitude, mx, my, t_n, y_n = self._forcing_arrays(
             forcing_hat
         )
         geometry = self._geometry(latitude, y_n)
+        quadrature = self._zonal_quadrature(
+            longitude, latitude, geometry
+        )
+        w_ek = self._ekman_curl(mx, my, latitude, longitude)
+        t_ek = self._regional_ekman_transport(
+            my, quadrature, latitude.size
+        )
+        return self._solve_from_ekman(
+            omega,
+            latitude,
+            w_ek,
+            t_ek,
+            t_n,
+            geometry,
+            quadrature,
+            forcing_hat.omega,
+            forcing_hat.latitude,
+        )
+
+    def _solve_from_ekman(
+        self,
+        omega: np.ndarray,
+        latitude: np.ndarray,
+        w_ek: np.ndarray,
+        t_ek_forcing: np.ndarray,
+        t_n: np.ndarray,
+        geometry,
+        quadrature,
+        omega_coordinate: xr.DataArray,
+        latitude_coordinate: xr.DataArray,
+    ) -> xr.Dataset:
+        """Apply the frequency-space Rossby-wave kernel."""
         lat_rad = np.deg2rad(latitude)
-        lon_rad = np.deg2rad(longitude)
-        cos_lat = np.cos(lat_rad)
         f = 2.0 * EARTH_ROTATION_S * np.sin(lat_rad)
         depth = float(self.isobath_ds.attrs["isobath_depth_m"])
         gh = self.g_prime * depth
         c = _rossby_speed(latitude, self.g_prime, depth)
-
-        dmx_dlon = np.gradient(mx, lon_rad, axis=2, edge_order=2)
-        dmycos_dlat = np.gradient(my * cos_lat[None, :, None], lat_rad, axis=1, edge_order=2)
-        w_ek = (dmx_dlon + dmycos_dlat) / (
-            EARTH_RADIUS_M * cos_lat[None, :, None]
-        )
 
         shape = (omega.size, len(_REGIONS), latitude.size)
         f_partial = np.full(shape, np.nan + 0j)
@@ -233,15 +309,11 @@ class GlobalRossbyModel:
 
         for region, (_, _, _) in enumerate(_REGIONS):
             indices, x_w, x_e = geometry[region]
-            q_f, source, ek = self._zonal_terms(
-                w_ek[:, indices, :],
-                my[:, indices, :],
-                longitude,
-                latitude[indices],
-                x_w,
-                x_e,
+            q_f, source = self._zonal_terms(
+                w_ek,
                 omega,
-                c[indices],
+                c,
+                quadrature[region],
             )
             dy = EARTH_RADIUS_M * np.deg2rad(latitude[indices])
             f_partial[:, region, indices] = _integral_to_north(q_f, dy)
@@ -257,7 +329,7 @@ class GlobalRossbyModel:
                 c[indices][None, :] * (phase_e - 1.0), dy
             )
             h_source[:, region, indices] = source
-            t_ek[:, region, indices] = ek
+            t_ek[:, region, indices] = t_ek_forcing[:, region, indices]
             propagation[:, region, indices] = phase_e
 
         south = np.array([item[0][0] for item in geometry])
@@ -304,9 +376,9 @@ class GlobalRossbyModel:
         t_g = transport - t_ek
         h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
         coords = {
-            "omega": forcing_hat.omega,
+            "omega": omega_coordinate,
             "region": [name for name, _, _ in _REGIONS],
-            "latitude": forcing_hat.latitude,
+            "latitude": latitude_coordinate,
         }
         result = xr.Dataset(
             {
@@ -343,16 +415,97 @@ class GlobalRossbyModel:
         if np.any(np.diff(latitude) <= 0) or np.any(np.diff(longitude) <= 0):
             raise ValueError("latitude and longitude must increase")
         mx = np.asarray(
-            forcing_hat.M_Ek_x.transpose("omega", "latitude", "longitude").values,
-            dtype=complex,
+            forcing_hat.M_Ek_x.transpose(
+                "omega", "latitude", "longitude"
+            ).values
         )
         my = np.asarray(
-            forcing_hat.M_Ek_y.transpose("omega", "latitude", "longitude").values,
-            dtype=complex,
+            forcing_hat.M_Ek_y.transpose(
+                "omega", "latitude", "longitude"
+            ).values
         )
+        wind_dtype = np.result_type(mx.dtype, my.dtype, np.complex64)
+        mx = np.asarray(mx, dtype=wind_dtype)
+        my = np.asarray(my, dtype=wind_dtype)
         t_n = np.asarray(forcing_hat.T_N.transpose("omega").values, dtype=complex)
         y_n = GlobalRossbyModel._northern_boundary_latitude(forcing_hat.T_N)
         return omega, latitude, longitude, mx, my, t_n, y_n
+
+    @staticmethod
+    def _temporal_wind_arrays(
+        forcing_ds: xr.Dataset,
+        time_dim: str,
+        require_zero_mean: bool,
+        zero_mean_rtol: float,
+    ):
+        """Validate temporal wind forcing and return ordered arrays."""
+        missing_coords = {"latitude", "longitude"}.difference(
+            forcing_ds.coords
+        )
+        if missing_coords:
+            raise ValueError(
+                "forcing dataset is missing: "
+                + ", ".join(sorted(missing_coords))
+            )
+        latitude = np.asarray(forcing_ds.latitude.values, dtype=float)
+        longitude = np.asarray(forcing_ds.longitude.values, dtype=float)
+        if latitude.ndim != 1 or longitude.ndim != 1:
+            raise ValueError("latitude and longitude must be one-dimensional")
+        if latitude.size < 3 or longitude.size < 3:
+            raise ValueError("spatial coordinates require at least three points")
+        if np.any(np.diff(latitude) <= 0) or np.any(np.diff(longitude) <= 0):
+            raise ValueError("latitude and longitude must increase")
+
+        expected_dims = {time_dim, "latitude", "longitude"}
+        arrays = []
+        for name in ("M_Ek_x", "M_Ek_y"):
+            variable = forcing_ds[name]
+            if set(variable.dims) != expected_dims:
+                raise ValueError(
+                    f"{name} must have dimensions {sorted(expected_dims)}"
+                )
+            values = np.asarray(
+                variable.transpose(
+                    time_dim, "latitude", "longitude"
+                ).data
+            )
+            _validate_real_finite(values, name)
+            if require_zero_mean:
+                _validate_zero_mean(values, 0, zero_mean_rtol)
+            arrays.append(values)
+
+        wind_dtype = np.result_type(
+            arrays[0].dtype, arrays[1].dtype, np.float32
+        )
+        mx = np.asarray(arrays[0], dtype=wind_dtype)
+        my = np.asarray(arrays[1], dtype=wind_dtype)
+        return latitude, longitude, mx, my
+
+    @staticmethod
+    def _ekman_curl(
+        mx: np.ndarray,
+        my: np.ndarray,
+        latitude: np.ndarray,
+        longitude: np.ndarray,
+    ) -> np.ndarray:
+        """Return the global divergence of the Ekman transport."""
+        lat_rad = np.deg2rad(latitude)
+        lon_rad = np.deg2rad(longitude)
+        real_dtype = np.empty((), dtype=mx.dtype).real.dtype
+        cos_lat = np.cos(lat_rad).astype(real_dtype, copy=False)
+
+        w_ek = np.gradient(mx, lon_rad, axis=2, edge_order=2)
+        my_cos = my * cos_lat[None, :, None]
+        meridional = np.gradient(
+            my_cos, lat_rad, axis=1, edge_order=2
+        )
+        np.add(w_ek, meridional, out=w_ek)
+        del meridional, my_cos
+        denominator = (EARTH_RADIUS_M * cos_lat).astype(
+            real_dtype, copy=False
+        )
+        np.divide(w_ek, denominator[None, :, None], out=w_ek)
+        return w_ek
 
     @staticmethod
     def _northern_boundary_latitude(t_n: xr.DataArray) -> float:
@@ -500,28 +653,133 @@ class GlobalRossbyModel:
         return output
 
     @staticmethod
-    def _zonal_terms(w, my, longitude, latitude, x_w, x_e, omega, c):
-        """Integrate regional forcing, thickness source, and Ekman transport."""
-        n_omega, n_latitude, _ = w.shape
-        q_f = np.empty((n_omega, n_latitude), dtype=complex)
+    def _zonal_quadrature(longitude, latitude, geometry):
+        """Precompute regional interpolation and trapezoidal weights."""
+        output = []
+        for indices, x_w, x_e in geometry:
+            rules = []
+            for latitude_index, west, east in zip(indices, x_w, x_e):
+                inside = np.flatnonzero(
+                    (longitude > west) & (longitude < east)
+                )
+                interior = (
+                    slice(int(inside[0]), int(inside[-1]) + 1)
+                    if inside.size
+                    else slice(0, 0)
+                )
+                x_deg = np.concatenate(
+                    ([west], longitude[interior], [east])
+                )
+                if np.any(np.diff(x_deg) <= 0):
+                    raise ValueError(
+                        "each eastern boundary must lie east of its "
+                        "western boundary"
+                    )
+                x = (
+                    EARTH_RADIUS_M
+                    * np.cos(np.deg2rad(latitude[latitude_index]))
+                    * np.deg2rad(x_deg)
+                )
+                dx = np.diff(x)
+                weights = np.empty_like(x)
+                weights[0] = 0.5 * dx[0]
+                weights[-1] = 0.5 * dx[-1]
+                if weights.size > 2:
+                    weights[1:-1] = 0.5 * (dx[:-1] + dx[1:])
+                rules.append(
+                    _ZonalRule(
+                        int(latitude_index),
+                        interior,
+                        GlobalRossbyModel._interpolation_rule(
+                            longitude, west
+                        ),
+                        GlobalRossbyModel._interpolation_rule(
+                            longitude, east
+                        ),
+                        x,
+                        weights,
+                    )
+                )
+            output.append(rules)
+        return output
+
+    @staticmethod
+    def _interpolation_rule(
+        coordinate: np.ndarray, value: float
+    ) -> tuple[int, int, float]:
+        """Return the two indices and weight for linear interpolation."""
+        if value <= coordinate[0]:
+            return 0, 0, 0.0
+        if value >= coordinate[-1]:
+            last = coordinate.size - 1
+            return last, last, 0.0
+        high = int(np.searchsorted(coordinate, value, side="right"))
+        low = high - 1
+        weight = (value - coordinate[low]) / (
+            coordinate[high] - coordinate[low]
+        )
+        return low, high, float(weight)
+
+    @staticmethod
+    def _field_on_zonal_grid(
+        field: np.ndarray, rule: _ZonalRule
+    ) -> np.ndarray:
+        """Interpolate both boundaries and retain interior grid values."""
+        interior = field[:, rule.interior]
+        output = np.empty(
+            (field.shape[0], interior.shape[1] + 2), dtype=field.dtype
+        )
+        output[:, 1:-1] = interior
+        for column, (low, high, weight) in (
+            (0, rule.west),
+            (-1, rule.east),
+        ):
+            output[:, column] = (
+                field[:, low]
+                + weight * (field[:, high] - field[:, low])
+            )
+        return output
+
+    @staticmethod
+    def _regional_ekman_transport(
+        my: np.ndarray, quadrature, latitude_size: int
+    ) -> np.ndarray:
+        """Integrate northward Ekman transport across each region."""
+        output = np.zeros(
+            (my.shape[0], len(_REGIONS), latitude_size),
+            dtype=np.result_type(my.dtype, np.float64),
+        )
+        for region, rules in enumerate(quadrature):
+            for rule in rules:
+                field = GlobalRossbyModel._field_on_zonal_grid(
+                    my[:, rule.latitude_index, :], rule
+                )
+                output[:, region, rule.latitude_index] = np.sum(
+                    field * rule.weights[None, :], axis=1
+                )
+        return output
+
+    @staticmethod
+    def _zonal_terms(w, omega, c, rules):
+        """Integrate frequency-dependent regional wind forcing."""
+        q_f = np.empty((omega.size, len(rules)), dtype=complex)
         source = np.empty_like(q_f)
-        ek = np.empty_like(q_f)
-        for j in range(n_latitude):
-            inside = longitude[(longitude > x_w[j]) & (longitude < x_e[j])]
-            x_deg = np.concatenate(([x_w[j]], inside, [x_e[j]]))
-            if np.any(np.diff(x_deg) <= 0):
-                raise ValueError("each eastern boundary must lie east of its western boundary")
-            field_w = np.vstack([np.interp(x_deg, longitude, row) for row in w[:, j]])
-            field_my = np.vstack([np.interp(x_deg, longitude, row) for row in my[:, j]])
-            x = EARTH_RADIUS_M * np.cos(np.deg2rad(latitude[j])) * np.deg2rad(x_deg)
-            phase = np.exp(1j * omega[:, None] * (x[0] - x[None, :]) / c[j])
-            dx = np.diff(x)[None, :]
-            f_integrand = (phase - 1.0) * field_w
-            h_integrand = phase * field_w / c[j]
-            q_f[:, j] = np.sum(0.5 * (f_integrand[:, :-1] + f_integrand[:, 1:]) * dx, axis=1)
-            source[:, j] = np.sum(0.5 * (h_integrand[:, :-1] + h_integrand[:, 1:]) * dx, axis=1)
-            ek[:, j] = np.sum(0.5 * (field_my[:, :-1] + field_my[:, 1:]) * dx, axis=1)
-        return q_f, source, ek
+        for j, rule in enumerate(rules):
+            field = GlobalRossbyModel._field_on_zonal_grid(
+                w[:, rule.latitude_index, :], rule
+            )
+            weighted = field * rule.weights[None, :]
+            phase = np.exp(
+                1j
+                * omega[:, None]
+                * (rule.x[0] - rule.x[None, :])
+                / c[rule.latitude_index]
+            )
+            unphased = np.sum(weighted, axis=1)
+            phased = np.sum(phase * weighted, axis=1)
+            q_f[:, j] = phased - unphased
+            source[:, j] = phased / c[rule.latitude_index]
+        return q_f, source
 
     @staticmethod
     def _solve_boundaries(omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p):

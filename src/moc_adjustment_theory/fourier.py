@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 import numpy as np
 import xarray as xr
+from scipy import fft
 from scipy.signal import butter, sosfiltfilt
 
 _METADATA_KEY = "_moc_adjustment_fourier"
@@ -21,7 +22,7 @@ def forward_transform(
 ) -> xr.DataArray:
     """Transform real, uniformly sampled data to angular-frequency space.
 
-    The transform uses `numpy.fft.rfft`, appending at least ``pad_length`` zero
+    The transform uses a real FFT, appending at least ``pad_length`` zero
     samples on the right. One additional zero is appended when needed to make
     the full transform length odd, avoiding a self-conjugate Nyquist bin when
     the model applies complex travel-time phases. Angular frequency is returned
@@ -53,24 +54,18 @@ def forward_transform(
     _validate_real_finite(values, "data")
     axis = data.get_axis_num(time_dim)
     if require_zero_mean:
-        means = np.abs(np.mean(values, axis=axis))
-        field_scale = np.max(np.abs(values))
-        if np.any(means > zero_mean_rtol * field_scale):
-            raise ValueError(
-                "each time series must be zero mean; pass "
-                "require_zero_mean=False to retain a nonzero mean"
-            )
+        _validate_zero_mean(values, axis, zero_mean_rtol)
 
     original_length = data.sizes[time_dim]
     padded_length = _padded_length(original_length, pad_length)
-    transformed = np.fft.rfft(values, n=padded_length, axis=axis)
+    transformed = fft.rfft(values, n=padded_length, axis=axis, workers=-1)
     if require_zero_mean:
         # The anomaly contract is exact in spectral space even when float32
         # storage leaves a small residual after demeaning.
         index = [slice(None)] * transformed.ndim
         index[axis] = 0
         transformed[tuple(index)] = 0.0
-    omega = 2.0 * np.pi * np.fft.rfftfreq(padded_length, d=dt_seconds)
+    omega = 2.0 * np.pi * fft.rfftfreq(padded_length, d=dt_seconds)
     dims = tuple(_OMEGA_DIM if dim == time_dim else dim for dim in data.dims)
     coords = {
         name: coord
@@ -109,7 +104,7 @@ def inverse_transform(
     """Invert a spectrum made by `forward_transform` onto its time grid.
 
     The inverse reads the dimension, sampling, and padding contract stored by
-    `forward_transform`, applies `numpy.fft.irfft`, and removes the causal
+    `forward_transform`, applies a real inverse FFT, and removes the causal
     right padding. An imaginary DC component, which cannot represent a real time
     series, is rejected above ``imaginary_rtol`` relative to the largest
     spectral magnitude in the corresponding series. The odd padded length has
@@ -146,7 +141,7 @@ def inverse_transform(
         or dt_seconds <= 0
     ):
         raise ValueError("invalid time step in spectral metadata")
-    expected_omega = 2.0 * np.pi * np.fft.rfftfreq(
+    expected_omega = 2.0 * np.pi * fft.rfftfreq(
         padded_length, d=float(dt_seconds)
     )
     if _OMEGA_DIM not in spectrum.coords or not np.allclose(
@@ -163,7 +158,7 @@ def inverse_transform(
     if np.any(inconsistent):
         raise ValueError("spectrum is inconsistent with a real time series")
 
-    restored = np.fft.irfft(values, n=padded_length, axis=axis)
+    restored = fft.irfft(values, n=padded_length, axis=axis, workers=-1)
     restored = np.take(restored, np.arange(original_length), axis=axis)
     dims = tuple(time_dim if dim == _OMEGA_DIM else dim for dim in spectrum.dims)
     coords = {
@@ -384,6 +379,19 @@ def _validate_real_finite(values: np.ndarray, name: str) -> None:
     _validate_numeric_finite(values, name)
     if np.iscomplexobj(values):
         raise TypeError(f"{name} must contain real values")
+
+
+def _validate_zero_mean(
+    values: np.ndarray, axis: int, zero_mean_rtol: float
+) -> None:
+    """Require every series along ``axis`` to have negligible mean."""
+    means = np.abs(np.mean(values, axis=axis))
+    field_scale = np.max(np.abs(values))
+    if np.any(means > zero_mean_rtol * field_scale):
+        raise ValueError(
+            "each time series must be zero mean; pass "
+            "require_zero_mean=False to retain a nonzero mean"
+        )
 
 
 def _metadata_int(

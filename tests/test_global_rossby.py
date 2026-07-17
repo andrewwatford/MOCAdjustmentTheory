@@ -4,7 +4,12 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from moc_adjustment_theory import GlobalRossbyModel
+import moc_adjustment_theory.global_rossby as global_rossby
+from moc_adjustment_theory import (
+    GlobalRossbyModel,
+    forward_transform,
+    inverse_transform,
+)
 
 
 def geometry():
@@ -81,7 +86,7 @@ def temporal_forcing():
 
 
 def test_unforced_wind_solution_closes_regional_budgets():
-    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing())
+    result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(forcing())
 
     assert set(result.data_vars) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
     assert result.h_e.dims == ("omega", "region")
@@ -102,7 +107,7 @@ def test_unforced_wind_solution_closes_regional_budgets():
 
 
 def test_transition_topology_conserves_transport():
-    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing())
+    result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(forcing())
     t = result.T.isel(omega=1)
 
     north_4 = t.sel(region="atlantic_indian").dropna("latitude")[-1]
@@ -117,7 +122,7 @@ def test_transition_topology_conserves_transport():
 
 
 def test_northern_forcing_latitude_truncates_only_the_atlantic():
-    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(
+    result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(
         forcing(t_n_latitude=55.0)
     )
 
@@ -132,24 +137,24 @@ def test_northern_forcing_latitude_must_be_valid_and_covered():
     model = GlobalRossbyModel(geometry(), 0.02)
 
     with pytest.raises(ValueError, match="south of the equator"):
-        model.solve_frequency(forcing(t_n_latitude=-1.0))
+        model._solve_frequency(forcing(t_n_latitude=-1.0))
     with pytest.raises(ValueError, match="forcing latitude does not reach"):
-        model.solve_frequency(forcing(t_n_latitude=80.0))
+        model._solve_frequency(forcing(t_n_latitude=80.0))
 
     missing = forcing()
     missing.T_N.attrs.clear()
     with pytest.raises(ValueError, match="finite numeric"):
-        model.solve_frequency(missing)
+        model._solve_frequency(missing)
 
     short_geometry = geometry().where(geometry().latitude <= 60.0)
     with pytest.raises(ValueError, match="Atlantic geometry does not reach"):
-        GlobalRossbyModel(short_geometry, 0.02).solve_frequency(
+        GlobalRossbyModel(short_geometry, 0.02)._solve_frequency(
             forcing(t_n_latitude=70.0)
         )
 
 
 def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
-    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(
+    result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(
         forcing(t_n=(0.0, 0.0), wind=True)
     )
 
@@ -191,7 +196,9 @@ def test_boundary_solution_satisfies_three_basin_system():
 
 def test_nonzero_dc_forcing_is_rejected():
     with pytest.raises(ValueError, match="zero-frequency forcing"):
-        GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing(t_n=(1.0, 0.0)))
+        GlobalRossbyModel(geometry(), 0.02)._solve_frequency(
+            forcing(t_n=(1.0, 0.0))
+        )
 
 
 def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
@@ -214,6 +221,85 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
     for name in result.data_vars:
         assert np.all(np.isfinite(result[name].fillna(0)))
+
+
+def test_solve_transforms_derived_ekman_fields_not_both_winds(
+    monkeypatch,
+) -> None:
+    """The temporal path performs one gridded FFT after linear preprocessing."""
+    transformed = []
+    actual_transform = global_rossby.forward_transform
+
+    def recording_transform(data, **kwargs):
+        transformed.append((data.name, data.dims))
+        return actual_transform(data, **kwargs)
+
+    monkeypatch.setattr(
+        global_rossby, "forward_transform", recording_transform
+    )
+
+    GlobalRossbyModel(geometry(), 0.02).solve(
+        temporal_forcing(),
+        pad_length=0,
+        sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
+    )
+
+    assert transformed == [
+        ("T_N", ("time",)),
+        ("w_Ek", ("time", "latitude", "longitude")),
+        ("T_Ek", ("time", "region", "latitude")),
+    ]
+
+
+def test_temporal_preprocessing_matches_internal_frequency_kernel() -> None:
+    """Spatial linear operations commute with the temporal transform."""
+    input_forcing = temporal_forcing()
+    phase = np.array([0.0, 1.0, 0.0, -1.0])[:, None, None]
+    latitude = input_forcing.latitude.values[None, :, None]
+    longitude = input_forcing.longitude.values[None, None, :]
+    input_forcing["M_Ek_x"] = (
+        ("time", "latitude", "longitude"),
+        phase * (1.0 + longitude / 400.0 + 0.0 * latitude),
+    )
+    input_forcing["M_Ek_y"] = (
+        ("time", "latitude", "longitude"),
+        phase * (2.0 + latitude / 100.0 + 0.0 * longitude),
+    )
+    spacing = 365.25 / 12 * 24 * 60 * 60
+    model = GlobalRossbyModel(geometry(), 0.02)
+
+    temporal = model.solve(
+        input_forcing,
+        pad_length=0,
+        sample_spacing_seconds=spacing,
+    )
+    forcing_hat = xr.Dataset(
+        {
+            name: forward_transform(
+                input_forcing[name],
+                pad_length=0,
+                sample_spacing_seconds=spacing,
+            )
+            for name in ("M_Ek_x", "M_Ek_y", "T_N")
+        }
+    )
+    spectral = model._solve_frequency(forcing_hat)
+    metadata = forcing_hat.T_N.attrs["_moc_adjustment_fourier"]
+    restored = {}
+    for name, array in spectral.data_vars.items():
+        array = array.copy(deep=False)
+        array.attrs = {
+            **array.attrs,
+            "_moc_adjustment_fourier": metadata,
+        }
+        masked = array.isnull().all("omega")
+        restored[name] = inverse_transform(array.fillna(0.0)).where(~masked)
+
+    xr.testing.assert_allclose(temporal, xr.Dataset(restored))
+
+
+def test_frequency_kernel_is_not_public() -> None:
+    assert not hasattr(GlobalRossbyModel(geometry(), 0.02), "solve_frequency")
 
 
 def test_default_padding_covers_longest_crossing_time() -> None:
