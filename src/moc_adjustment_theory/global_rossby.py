@@ -37,6 +37,8 @@ class _ZonalRule(NamedTuple):
     interior: slice
     west: tuple[int, int, float]
     east: tuple[int, int, float]
+    grid_indices: np.ndarray
+    grid_nodes: np.ndarray
     x: np.ndarray
     weights: np.ndarray
 
@@ -129,7 +131,7 @@ class GlobalRossbyModel:
         Returns
         -------
         xarray.Dataset
-            ``h_e``, ``h_b``, ``h_w``, ``T``, ``T_g`` and ``T_Ek`` on the
+            ``h_e``, ``h_b``, ``h_w``, ``h``, ``T``, ``T_g`` and ``T_Ek`` on the
             original time coordinate and the five-region model geometry.
         """
         required = ("M_Ek_x", "M_Ek_y", "T_N")
@@ -225,6 +227,7 @@ class GlobalRossbyModel:
             quadrature,
             w_ek_hat.omega,
             w_ek_hat.latitude,
+            w_ek_hat.longitude,
         )
 
         metadata = t_n_hat.attrs[_METADATA_KEY]
@@ -279,6 +282,7 @@ class GlobalRossbyModel:
             quadrature,
             forcing_hat.omega,
             forcing_hat.latitude,
+            forcing_hat.longitude,
         )
 
     def _solve_from_ekman(
@@ -292,6 +296,7 @@ class GlobalRossbyModel:
         quadrature,
         omega_coordinate: xr.DataArray,
         latitude_coordinate: xr.DataArray,
+        longitude_coordinate: xr.DataArray,
     ) -> xr.Dataset:
         """Apply the frequency-space Rossby-wave kernel."""
         lat_rad = np.deg2rad(latitude)
@@ -375,23 +380,29 @@ class GlobalRossbyModel:
 
         t_g = transport - t_ek
         h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
+        h = self._height_field(
+            w_ek, omega, c, h_e, quadrature, latitude.size,
+            longitude_coordinate.size,
+        )
         coords = {
             "omega": omega_coordinate,
             "region": [name for name, _, _ in _REGIONS],
             "latitude": latitude_coordinate,
+            "longitude": longitude_coordinate,
         }
         result = xr.Dataset(
             {
                 "h_e": (("omega", "region"), h_e),
                 "h_b": (("omega", "region", "latitude"), h_b),
                 "h_w": (("omega", "region", "latitude"), h_w),
+                "h": (("omega", "region", "latitude", "longitude"), h),
                 "T": (("omega", "region", "latitude"), transport),
                 "T_g": (("omega", "region", "latitude"), t_g),
                 "T_Ek": (("omega", "region", "latitude"), t_ek),
             },
             coords=coords,
         )
-        for name in ("h_e", "h_b", "h_w"):
+        for name in ("h_e", "h_b", "h_w", "h"):
             result[name].attrs["units"] = "m"
         for name in ("T", "T_g", "T_Ek"):
             result[name].attrs["units"] = "m3 s-1"
@@ -696,11 +707,73 @@ class GlobalRossbyModel:
                         GlobalRossbyModel._interpolation_rule(
                             longitude, east
                         ),
+                        np.flatnonzero(
+                            (longitude >= west) & (longitude <= east)
+                        ),
+                        np.searchsorted(
+                            x_deg,
+                            longitude[
+                                (longitude >= west) & (longitude <= east)
+                            ],
+                        ),
                         x,
                         weights,
                     )
                 )
             output.append(rules)
+        return output
+
+    @staticmethod
+    def _height_field(
+        w: np.ndarray,
+        omega: np.ndarray,
+        c: np.ndarray,
+        h_e: np.ndarray,
+        quadrature,
+        latitude_size: int,
+        longitude_size: int,
+    ) -> np.ndarray:
+        """Evaluate thickness at every forcing-grid point in each region."""
+        output = np.full(
+            (omega.size, len(_REGIONS), latitude_size, longitude_size),
+            np.nan + 0j,
+        )
+        for region, rules in enumerate(quadrature):
+            for rule in rules:
+                field = GlobalRossbyModel._field_on_zonal_grid(
+                    w[:, rule.latitude_index, :], rule
+                )
+                speed = c[rule.latitude_index]
+                phase_basis = np.exp(
+                    -1j * omega[:, None] * rule.x[None, :] / speed
+                )
+                integrand = field * phase_basis
+                increments = (
+                    0.5
+                    * (integrand[:, :-1] + integrand[:, 1:])
+                    * np.diff(rule.x)[None, :]
+                )
+                integral = np.zeros_like(integrand, dtype=complex)
+                integral[:, :-1] = np.cumsum(
+                    increments[:, ::-1], axis=1
+                )[:, ::-1]
+                phase = np.exp(
+                    1j
+                    * omega[:, None]
+                    * (rule.x[None, :] - rule.x[-1])
+                    / speed
+                )
+                height = (
+                    h_e[:, region, None] * phase
+                    - np.exp(
+                        1j * omega[:, None] * rule.x[None, :] / speed
+                    )
+                    * integral
+                    / speed
+                )
+                output[
+                    :, region, rule.latitude_index, rule.grid_indices
+                ] = height[:, rule.grid_nodes]
         return output
 
     @staticmethod

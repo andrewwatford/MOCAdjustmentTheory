@@ -88,7 +88,7 @@ def temporal_forcing():
 def test_unforced_wind_solution_closes_regional_budgets():
     result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(forcing())
 
-    assert set(result.data_vars) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
+    assert set(result.data_vars) == {"h_e", "h_b", "h_w", "h", "T", "T_g", "T_Ek"}
     assert result.h_e.dims == ("omega", "region")
     assert result.T.dims == ("omega", "region", "latitude")
     assert np.all(result.isel(omega=0).fillna(0) == 0)
@@ -104,6 +104,27 @@ def test_unforced_wind_solution_closes_regional_budgets():
     h_b = result.h_b.sel(region="north_atlantic").isel(omega=1).dropna("latitude")
     assert np.all(np.isfinite(h_b))
     np.testing.assert_allclose(np.abs(h_b), abs(result.h_e.sel(region="north_atlantic").isel(omega=1)))
+
+    h = result.h.sel(region="north_atlantic").isel(omega=1)
+    assert h.dims == ("latitude", "longitude")
+    for latitude in h.dropna("latitude", how="all").latitude.values:
+        row = h.sel(latitude=latitude).dropna("longitude")
+        assert row.size
+        np.testing.assert_allclose(
+            row[-1], result.h_e.sel(region="north_atlantic").isel(omega=1)
+            * np.exp(
+                1j * forcing().omega[1].item()
+                * global_rossby.EARTH_RADIUS_M
+                * np.cos(np.deg2rad(latitude))
+                * np.deg2rad(
+                    row.longitude[-1].item()
+                    - geometry().x_eA.sel(latitude=latitude).item()
+                )
+                / global_rossby._rossby_speed(
+                    np.asarray([latitude]), 0.02, 1000.0
+                )[0]
+            ),
+        )
 
 
 def test_transition_topology_conserves_transport():
@@ -167,6 +188,19 @@ def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
         h_b = result.h_b.sel(region=region).isel(omega=1).dropna("latitude")
         assert h_b.size and np.all(np.isfinite(h_b))
 
+        field = result.h.sel(region=region).isel(omega=1)
+        for latitude in field.dropna("latitude", how="all").latitude.values:
+            row = field.sel(latitude=latitude).dropna("longitude")
+            np.testing.assert_allclose(
+                row[0], h_b.sel(latitude=latitude), rtol=1e-12, atol=1e-12
+            )
+            np.testing.assert_allclose(
+                row[-1],
+                result.h_e.sel(region=region).isel(omega=1),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
 
 def test_boundary_solution_satisfies_three_basin_system():
     omega = np.array([1.0e-6])
@@ -211,10 +245,11 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         sample_spacing_seconds=spacing,
     )
 
-    assert set(result) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
+    assert set(result) == {"h_e", "h_b", "h_w", "h", "T", "T_g", "T_Ek"}
     np.testing.assert_array_equal(result.time, input_forcing.time)
     assert result.h_e.dims == ("time", "region")
     assert result.T.dims == ("time", "region", "latitude")
+    assert result.h.dims == ("time", "region", "latitude", "longitude")
     assert float(
         result.T.sel(region="north_atlantic").dropna("latitude").latitude[-1]
     ) == 60.0
@@ -296,7 +331,7 @@ def test_temporal_preprocessing_matches_internal_frequency_kernel() -> None:
         restored[name] = inverse_transform(array.fillna(0.0)).where(~masked)
 
     restored = xr.Dataset(restored)
-    for name in ("h_e", "h_b", "h_w"):
+    for name in ("h_e", "h_b", "h_w", "h"):
         xr.testing.assert_allclose(
             temporal[name], restored[name], rtol=0.0, atol=1e-10
         )
