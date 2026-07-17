@@ -11,12 +11,12 @@ The user workflow is:
    typically a prescribed isobath.
 2. Construct an `xarray.Dataset` containing an Ekman forcing field and a time
    series of northern-boundary forcing.
-3. Pass those datasets and the reduced gravity $g'$ to `GlobalAdjustmentModel`.
+3. Pass those datasets and the reduced gravity $g'$ to `GlobalRossbyModel`.
 4. Call `solve()` to obtain the results as an `xarray.Dataset`.
 
 Users provide the forcing and isobath datasets, and the model returns another
 dataset. The Fourier interface is the stateless `forward_transform` and
-`inverse_transform` function pair. `GlobalAdjustmentModel.solve()` applies that
+`inverse_transform` function pair. `GlobalRossbyModel.solve()` applies that
 pair consistently around the frequency-space model.
 
 ## Theory
@@ -146,7 +146,7 @@ $$
 The intended interface is:
 
 ```python
-model = GlobalAdjustmentModel(
+model = GlobalRossbyModel(
     isobath_ds=isobath_ds,
     g_prime=g_prime,  # m s^-2
 )

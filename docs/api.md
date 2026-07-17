@@ -2,7 +2,7 @@
 
 ## Model
 
-::: moc_adjustment_theory.GlobalAdjustmentModel
+::: moc_adjustment_theory.GlobalRossbyModel
     options:
       show_root_heading: true
       members_order: source

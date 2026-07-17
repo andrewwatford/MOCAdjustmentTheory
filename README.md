@@ -22,12 +22,12 @@ python -m mkdocs build --strict
 ```python
 import xarray as xr
 
-from moc_adjustment_theory import GlobalAdjustmentModel
+from moc_adjustment_theory import GlobalRossbyModel
 
 isobath = xr.open_dataset("data/tracked/isobath/global_isobath_GEBCO_1000m.nc")
 forcing = xr.open_dataset("data/untracked/forcing/global_ERA5_SCOTIA_forcing.nc")
 
-model = GlobalAdjustmentModel(isobath, g_prime=0.02)
+model = GlobalRossbyModel(isobath, g_prime=0.02)
 solution = model.solve(
     forcing,
     sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
