@@ -131,8 +131,10 @@ class GlobalRossbyModel:
         Returns
         -------
         xarray.Dataset
-            ``h_e``, ``h_b``, ``h_w``, ``h``, ``T``, ``T_g`` and ``T_Ek`` on the
-            original time coordinate and the five-region model geometry.
+            ``h_e``, ``h_b``, ``h_w``, ``h``, ``T``, ``T_g`` and ``T_Ek`` on
+            the original time coordinate and the five-region model geometry.
+            ``h`` is evaluated on the forcing longitude grid and masked
+            outside each region's active boundaries.
         """
         required = ("M_Ek_x", "M_Ek_y", "T_N")
         missing = set(required).difference(forcing_ds.data_vars)
@@ -381,7 +383,12 @@ class GlobalRossbyModel:
         t_g = transport - t_ek
         h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
         h = self._height_field(
-            w_ek, omega, c, h_e, quadrature, latitude.size,
+            w_ek,
+            omega,
+            c,
+            h_e,
+            quadrature,
+            latitude.size,
             longitude_coordinate.size,
         )
         coords = {

@@ -202,6 +202,34 @@ def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
             )
 
 
+def test_height_field_uses_grid_points_between_off_grid_boundaries():
+    shifted = geometry().copy()
+    shifted["x_wA"] = shifted.x_wA + 5.0
+    shifted["x_eA"] = shifted.x_eA + 5.0
+
+    result = GlobalRossbyModel(shifted, 0.02)._solve_frequency(forcing())
+    field = result.h.sel(region="north_atlantic").isel(omega=1)
+
+    for latitude in field.dropna("latitude", how="all").latitude.values:
+        row = field.sel(latitude=latitude).dropna("longitude")
+        assert row.longitude[0] == -60.0
+        assert row.longitude[-1] == 10.0
+        speed = global_rossby._rossby_speed(
+            np.asarray([latitude]), 0.02, 1000.0
+        )[0]
+        expected = result.h_e.sel(region="north_atlantic").isel(
+            omega=1
+        ) * np.exp(
+            1j
+            * forcing().omega[1].item()
+            * global_rossby.EARTH_RADIUS_M
+            * np.cos(np.deg2rad(latitude))
+            * np.deg2rad(row.longitude - 15.0)
+            / speed
+        )
+        np.testing.assert_allclose(row, expected)
+
+
 def test_boundary_solution_satisfies_three_basin_system():
     omega = np.array([1.0e-6])
     f_term = np.array([[1 + 1j, 2 - 1j, 3 + 2j, 4 - 2j, 5 + 0.5j]])
