@@ -58,7 +58,6 @@ def forward_transform(
         values = values.rechunk({axis: -1})
         values = values.map_blocks(
             _validated_real_finite_block,
-            name="validate-real-finite",
             dtype=values.dtype,
         )
         if require_zero_mean:
@@ -74,7 +73,6 @@ def forward_transform(
                 axis=axis,
                 zero_mean_rtol=zero_mean_rtol,
                 dtype=values.dtype,
-                name="validate-zero-mean",
             )
     else:
         values = np.asarray(values)

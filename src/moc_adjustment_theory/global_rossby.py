@@ -5,13 +5,17 @@ from __future__ import annotations
 from numbers import Real
 from typing import NamedTuple
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 
 from .fourier import (
     _METADATA_KEY,
+    _validate_real_dtype,
     _validate_real_finite,
     _validate_zero_mean,
+    _validated_real_finite_block,
+    _validated_zero_mean_block,
     _validated_time,
     forward_transform,
     inverse_transform,
@@ -20,6 +24,9 @@ from .fourier import (
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_ROTATION_S = 7.292115e-5
 _T_N_LATITUDE_ATTR = "latitude_degrees_north"
+_INPUT_LATITUDE_CHUNK = 64
+_INPUT_LONGITUDE_CHUNK = 128
+_OUTPUT_TIME_CHUNK = 12
 
 _REGIONS = (
     ("north_atlantic", "x_wA", "x_eA"),
@@ -146,6 +153,14 @@ class GlobalRossbyModel:
             )
         self._northern_boundary_latitude(forcing_ds["T_N"])
 
+        forcing_lazy = forcing_ds[list(required)].chunk(
+            {
+                time_dim: -1,
+                "latitude": _INPUT_LATITUDE_CHUNK,
+                "longitude": _INPUT_LONGITUDE_CHUNK,
+            }
+        )
+
         if pad_length is None:
             _, dt_seconds = _validated_time(
                 forcing_ds["T_N"], time_dim, sample_spacing_seconds
@@ -160,14 +175,14 @@ class GlobalRossbyModel:
             "sample_spacing_seconds": sample_spacing_seconds,
         }
         t_n_hat = forward_transform(
-            forcing_ds["T_N"],
+            forcing_lazy["T_N"],
             require_zero_mean=require_zero_mean,
             zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
 
         latitude, longitude, mx, my = self._temporal_wind_arrays(
-            forcing_ds,
+            forcing_lazy,
             time_dim,
             require_zero_mean,
             zero_mean_rtol,
@@ -207,29 +222,24 @@ class GlobalRossbyModel:
         )
         w_ek_hat = forward_transform(
             w_ek_array,
-            require_zero_mean=False,
+            require_zero_mean=require_zero_mean,
+            zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
         del w_ek, w_ek_array
         t_ek_hat = forward_transform(
             t_ek_array,
-            require_zero_mean=False,
+            require_zero_mean=require_zero_mean,
+            zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
-        if require_zero_mean:
-            w_ek_hat.data[0] = 0.0
-            t_ek_hat.data[0] = 0.0
 
-        solution_hat = self._solve_from_ekman(
+        solution_hat = self._solve_from_ekman_lazy(
             np.asarray(w_ek_hat.omega.values, dtype=float),
             latitude,
-            np.asarray(
-                w_ek_hat.transpose("omega", "latitude", "longitude").values
-            ),
-            np.asarray(
-                t_ek_hat.transpose("omega", "region", "latitude").values
-            ),
-            np.asarray(t_n_hat.transpose("omega").values, dtype=complex),
+            w_ek_hat.transpose("omega", "latitude", "longitude").data,
+            t_ek_hat.transpose("omega", "region", "latitude").data,
+            t_n_hat.transpose("omega").data,
             geometry,
             quadrature,
             w_ek_hat.omega,
@@ -245,17 +255,19 @@ class GlobalRossbyModel:
             spectrum.attrs = dict(spectrum.attrs)
             spectrum.attrs[_METADATA_KEY] = metadata
             masked = spectrum.isnull().all("omega")
-            partially_missing = spectrum.isnull().any("omega") & ~masked
-            if bool(partially_missing.any()):
-                raise ValueError(
-                    f"{name} has missing values within an active spectrum"
-                )
-            transform_input = (
-                spectrum.fillna(0.0) if bool(masked.any()) else spectrum
-            )
+            transform_input = spectrum.fillna(0.0)
             restored = inverse_transform(
                 transform_input, imaginary_rtol=imaginary_rtol
             )
+            if isinstance(restored.data, da.Array):
+                chunk_map = {time_dim: _OUTPUT_TIME_CHUNK}
+                if "region" in restored.dims:
+                    chunk_map["region"] = 1
+                if "latitude" in restored.dims:
+                    chunk_map["latitude"] = _INPUT_LATITUDE_CHUNK
+                if "longitude" in restored.dims:
+                    chunk_map["longitude"] = _INPUT_LONGITUDE_CHUNK
+                restored = restored.chunk(chunk_map)
             solution[name] = restored.where(~masked)
 
         result = xr.Dataset(solution)
@@ -293,6 +305,301 @@ class GlobalRossbyModel:
             forcing_hat.omega,
             forcing_hat.latitude,
             forcing_hat.longitude,
+        )
+
+    def _solve_from_ekman_lazy(
+        self,
+        omega: np.ndarray,
+        latitude: np.ndarray,
+        w_ek: da.Array,
+        t_ek_forcing: da.Array,
+        t_n: da.Array,
+        geometry,
+        quadrature,
+        omega_coordinate: xr.DataArray,
+        latitude_coordinate: xr.DataArray,
+        longitude_coordinate: xr.DataArray,
+    ) -> xr.Dataset:
+        """Build the complete frequency-space solution as a Dask graph."""
+        lat_rad = np.deg2rad(latitude)
+        f = 2.0 * EARTH_ROTATION_S * np.sin(lat_rad)
+        depth = float(self.isobath_ds.attrs["isobath_depth_m"])
+        gh = self.g_prime * depth
+        c = _rossby_speed(latitude, self.g_prime, depth)
+        latitude_size = latitude.size
+
+        active_mask = np.zeros((len(_REGIONS), latitude_size), dtype=bool)
+        f_regions = []
+        r_regions = []
+        source_regions = []
+        propagation_regions = []
+        for region in range(len(_REGIONS)):
+            indices, x_w, x_e = geometry[region]
+            active_mask[region, indices] = True
+            q_f, source = self._zonal_terms(
+                w_ek, omega, c, quadrature[region]
+            )
+            dy = EARTH_RADIUS_M * np.deg2rad(latitude[indices])
+            f_region = _integral_to_north(q_f, dy)
+            phase_e = np.exp(
+                1j
+                * omega[:, None]
+                * EARTH_RADIUS_M
+                * np.cos(np.deg2rad(latitude[indices]))[None, :]
+                * np.deg2rad(x_w - x_e)[None, :]
+                / c[indices][None, :]
+            )
+            r_region = _integral_to_north(
+                c[indices][None, :] * (phase_e - 1.0), dy
+            )
+            f_regions.append(f_region)
+            r_regions.append(r_region)
+            source_regions.append(source)
+            propagation_regions.append(phase_e)
+
+        south = np.array([item[0][0] for item in geometry])
+        full_f = da.stack(
+            [values[:, 0] for values in f_regions], axis=1
+        )
+        full_r = np.stack(
+            [values[:, 0] for values in r_regions], axis=1
+        )
+        t_i_ek = t_ek_forcing[:, 1, south[1]]
+        t_p_ek = t_ek_forcing[:, 2, south[2]]
+        t_s = t_ek_forcing[:, 4, south[4]]
+
+        y_i = latitude[south[0]]
+        y_p = latitude[south[2]]
+        kappa_i = gh / (
+            2.0 * EARTH_ROTATION_S * np.sin(np.deg2rad(y_i))
+        )
+        kappa_p = gh / (
+            2.0 * EARTH_ROTATION_S * np.sin(np.deg2rad(y_p))
+        )
+        rhs = da.stack(
+            (
+                full_f[:, 0]
+                + full_f[:, 3]
+                + full_f[:, 4]
+                + t_n
+                + t_i_ek
+                + t_p_ek
+                - t_s,
+                full_f[:, 1] - t_i_ek,
+                full_f[:, 2] - t_p_ek,
+            ),
+            axis=1,
+        )
+        inverse = self._boundary_inverse(
+            omega, full_r, kappa_i, kappa_p
+        )
+        h_basin = da.einsum("nij,nj->ni", inverse, rhs)
+        h_e = h_basin[:, [0, 1, 2, 1, 2]]
+
+        source = da.stack(
+            [
+                _pad_active_latitudes(
+                    values, geometry[region][0], latitude_size
+                )
+                for region, values in enumerate(source_regions)
+            ],
+            axis=1,
+        )
+        propagation = np.full(
+            (omega.size, len(_REGIONS), latitude_size), np.nan + 0j
+        )
+        for region, values in enumerate(propagation_regions):
+            propagation[:, region, geometry[region][0]] = values
+        h_b = h_e[:, :, None] * propagation - source
+
+        active_transport = []
+        top = [t_n, da.zeros_like(t_n), da.zeros_like(t_n)]
+        for region in range(3):
+            active_transport.append(
+                top[region][:, None]
+                + f_regions[region]
+                - r_regions[region] * h_e[:, region, None]
+            )
+        top_4 = active_transport[0][:, 0] + active_transport[1][:, 0]
+        active_transport.append(
+            top_4[:, None]
+            + f_regions[3]
+            - r_regions[3] * h_e[:, 3, None]
+        )
+        top_5 = active_transport[2][:, 0] + active_transport[3][:, 0]
+        active_transport.append(
+            top_5[:, None]
+            + f_regions[4]
+            - r_regions[4] * h_e[:, 4, None]
+        )
+        transport = da.stack(
+            [
+                _pad_active_latitudes(
+                    values, geometry[region][0], latitude_size
+                )
+                for region, values in enumerate(active_transport)
+            ],
+            axis=1,
+        )
+
+        t_ek = da.where(
+            active_mask[None, :, :], t_ek_forcing, np.nan
+        )
+        t_g = transport - t_ek
+        h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
+        h = self._height_field_lazy(
+            w_ek,
+            omega,
+            c,
+            h_e,
+            quadrature,
+            latitude_size,
+            longitude_coordinate.size,
+        )
+
+        coords = {
+            "omega": omega_coordinate,
+            "region": [name for name, _, _ in _REGIONS],
+            "latitude": latitude_coordinate,
+            "longitude": longitude_coordinate,
+        }
+        result = xr.Dataset(
+            {
+                "h_e": (("omega", "region"), h_e),
+                "h_b": (("omega", "region", "latitude"), h_b),
+                "h_w": (("omega", "region", "latitude"), h_w),
+                "h": (
+                    ("omega", "region", "latitude", "longitude"),
+                    h,
+                ),
+                "T": (("omega", "region", "latitude"), transport),
+                "T_g": (("omega", "region", "latitude"), t_g),
+                "T_Ek": (("omega", "region", "latitude"), t_ek),
+            },
+            coords=coords,
+        )
+        for name in ("h_e", "h_b", "h_w", "h"):
+            result[name].attrs["units"] = "m"
+        for name in ("T", "T_g", "T_Ek"):
+            result[name].attrs["units"] = "m3 s-1"
+        result.omega.attrs.setdefault("units", "rad s-1")
+        return result
+
+    @staticmethod
+    def _boundary_inverse(
+        omega: np.ndarray,
+        r: np.ndarray,
+        kappa_i: float,
+        kappa_p: float,
+    ) -> np.ndarray:
+        """Return the inverse boundary matrix at every nonzero frequency."""
+        inverse = np.zeros((omega.size, 3, 3), dtype=complex)
+        zero = np.isclose(
+            omega, 0.0, rtol=0.0, atol=np.finfo(float).eps
+        )
+        for n in np.flatnonzero(~zero):
+            matrix = np.array(
+                [
+                    [
+                        r[n, 0] + kappa_i,
+                        r[n, 3] + kappa_p - kappa_i,
+                        r[n, 4] - kappa_p,
+                    ],
+                    [-kappa_i, r[n, 1] + kappa_i, 0.0],
+                    [0.0, -kappa_p, r[n, 2] + kappa_p],
+                ],
+                dtype=complex,
+            )
+            inverse[n] = np.linalg.inv(matrix)
+        return inverse
+
+    @staticmethod
+    def _height_field_lazy(
+        w: da.Array,
+        omega: np.ndarray,
+        c: np.ndarray,
+        h_e: da.Array,
+        quadrature,
+        latitude_size: int,
+        longitude_size: int,
+    ) -> da.Array:
+        """Build a lazy dense height spectrum from regional active rows."""
+        dtype = np.result_type(w.dtype, np.complex64)
+        real_dtype = np.empty((), dtype=dtype).real.dtype
+        blank = da.full(
+            (omega.size, longitude_size),
+            np.nan,
+            chunks=(omega.size, _INPUT_LONGITUDE_CHUNK),
+            dtype=dtype,
+        )
+        regions = []
+        for region, rules in enumerate(quadrature):
+            by_latitude = {rule.latitude_index: rule for rule in rules}
+            rows = []
+            for latitude_index in range(latitude_size):
+                rule = by_latitude.get(latitude_index)
+                if rule is None:
+                    rows.append(blank)
+                    continue
+                field = GlobalRossbyModel._field_on_zonal_grid(
+                    w[:, latitude_index, :], rule
+                ).rechunk({1: -1})
+                speed = real_dtype.type(c[latitude_index])
+                phase_basis = np.exp(
+                    -1j * omega[:, None] * rule.x[None, :] / speed
+                ).astype(dtype)
+                integrand = field * phase_basis
+                increments = (
+                    0.5
+                    * (integrand[:, :-1] + integrand[:, 1:])
+                    * np.diff(rule.x).astype(real_dtype)[None, :]
+                )
+                integral = da.concatenate(
+                    (
+                        da.cumsum(increments[:, ::-1], axis=1)[
+                            :, ::-1
+                        ],
+                        da.zeros(
+                            (omega.size, 1),
+                            chunks=(omega.size, 1),
+                            dtype=dtype,
+                        ),
+                    ),
+                    axis=1,
+                )
+                phase = np.exp(
+                    1j
+                    * omega[:, None]
+                    * (rule.x[None, :] - rule.x[-1])
+                    / speed
+                ).astype(dtype)
+                height = (
+                    h_e[:, region, None].astype(dtype) * phase
+                    - np.exp(
+                        1j * omega[:, None] * rule.x[None, :] / speed
+                    ).astype(dtype)
+                    * integral
+                    / speed
+                )
+                active = height[:, rule.grid_nodes]
+                west = int(rule.grid_indices[0])
+                east = longitude_size - int(rule.grid_indices[-1]) - 1
+                rows.append(
+                    da.pad(
+                        active,
+                        ((0, 0), (west, east)),
+                        mode="constant",
+                        constant_values=np.nan,
+                    )
+                )
+            regions.append(da.stack(rows, axis=1))
+        return da.stack(regions, axis=1).rechunk(
+            {
+                0: -1,
+                1: 1,
+                2: _INPUT_LATITUDE_CHUNK,
+                3: _INPUT_LONGITUDE_CHUNK,
+            }
         )
 
     def _solve_from_ekman(
@@ -390,7 +697,7 @@ class GlobalRossbyModel:
 
         t_g = transport - t_ek
         h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
-        h, h_region, h_latitude, h_longitude = self._height_field(
+        h = self._height_field(
             w_ek,
             omega,
             c,
@@ -403,16 +710,14 @@ class GlobalRossbyModel:
             "omega": omega_coordinate,
             "region": [name for name, _, _ in _REGIONS],
             "latitude": latitude_coordinate,
-            "height_region": ("height_point", h_region),
-            "height_latitude": ("height_point", h_latitude),
-            "height_longitude": ("height_point", h_longitude),
+            "longitude": longitude_coordinate,
         }
         result = xr.Dataset(
             {
                 "h_e": (("omega", "region"), h_e),
                 "h_b": (("omega", "region", "latitude"), h_b),
                 "h_w": (("omega", "region", "latitude"), h_w),
-                "h": (("omega", "height_point"), h),
+                "h": (("omega", "region", "latitude", "longitude"), h),
                 "T": (("omega", "region", "latitude"), transport),
                 "T_g": (("omega", "region", "latitude"), t_g),
                 "T_Ek": (("omega", "region", "latitude"), t_ek),
@@ -492,21 +797,45 @@ class GlobalRossbyModel:
                 raise ValueError(
                     f"{name} must have dimensions {sorted(expected_dims)}"
                 )
-            values = np.asarray(
-                variable.transpose(
-                    time_dim, "latitude", "longitude"
-                ).data
-            )
-            _validate_real_finite(values, name)
-            if require_zero_mean:
-                _validate_zero_mean(values, 0, zero_mean_rtol)
+            raw_values = variable.transpose(
+                time_dim, "latitude", "longitude"
+            ).data
+            if isinstance(raw_values, da.Array):
+                _validate_real_dtype(raw_values, name)
+                values = raw_values.map_blocks(
+                    _validated_real_finite_block,
+                    dtype=raw_values.dtype,
+                )
+                if require_zero_mean:
+                    field_scale = da.max(da.absolute(values))
+                    indices = tuple(range(values.ndim))
+                    values = da.blockwise(
+                        _validated_zero_mean_block,
+                        indices,
+                        values,
+                        indices,
+                        field_scale,
+                        (),
+                        axis=0,
+                        zero_mean_rtol=zero_mean_rtol,
+                        dtype=values.dtype,
+                    )
+            else:
+                values = np.asarray(raw_values)
+                _validate_real_finite(values, name)
+                if require_zero_mean:
+                    _validate_zero_mean(values, 0, zero_mean_rtol)
             arrays.append(values)
 
         wind_dtype = np.result_type(
             arrays[0].dtype, arrays[1].dtype, np.float32
         )
-        mx = np.asarray(arrays[0], dtype=wind_dtype)
-        my = np.asarray(arrays[1], dtype=wind_dtype)
+        if isinstance(arrays[0], da.Array):
+            mx = arrays[0].astype(wind_dtype)
+            my = arrays[1].astype(wind_dtype)
+        else:
+            mx = np.asarray(arrays[0], dtype=wind_dtype)
+            my = np.asarray(arrays[1], dtype=wind_dtype)
         return latitude, longitude, mx, my
 
     @staticmethod
@@ -521,6 +850,23 @@ class GlobalRossbyModel:
         lon_rad = np.deg2rad(longitude)
         real_dtype = np.empty((), dtype=mx.dtype).real.dtype
         cos_lat = np.cos(lat_rad).astype(real_dtype, copy=False)
+
+        if isinstance(mx, da.Array):
+            zonal = da.gradient(
+                mx, lon_rad, axis=2, edge_order=2
+            )
+            meridional = da.gradient(
+                my * cos_lat[None, :, None],
+                lat_rad,
+                axis=1,
+                edge_order=2,
+            )
+            denominator = (
+                EARTH_RADIUS_M * cos_lat
+            ).astype(real_dtype, copy=False)
+            return (
+                (zonal + meridional) / denominator[None, :, None]
+            ).astype(real_dtype)
 
         w_ek = np.gradient(mx, lon_rad, axis=2, edge_order=2)
         my_cos = my * cos_lat[None, :, None]
@@ -749,21 +1095,18 @@ class GlobalRossbyModel:
         quadrature,
         latitude: np.ndarray,
         longitude: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
         """Evaluate thickness at every forcing-grid point in each region."""
-        point_count = sum(
-            rule.grid_indices.size
-            for rules in quadrature
-            for rule in rules
-        )
-        output = np.empty(
-            (omega.size, point_count),
+        output = np.full(
+            (
+                omega.size,
+                len(_REGIONS),
+                latitude.size,
+                longitude.size,
+            ),
+            np.nan + 0j,
             dtype=np.result_type(w.dtype, np.complex64),
         )
-        region_coordinate = np.empty(point_count, dtype="U16")
-        latitude_coordinate = np.empty(point_count, dtype=float)
-        longitude_coordinate = np.empty(point_count, dtype=float)
-        offset = 0
         for region, rules in enumerate(quadrature):
             for rule in rules:
                 field = GlobalRossbyModel._field_on_zonal_grid(
@@ -797,19 +1140,10 @@ class GlobalRossbyModel:
                     * integral
                     / speed
                 )
-                count = rule.grid_indices.size
-                target = slice(offset, offset + count)
-                output[:, target] = height[:, rule.grid_nodes]
-                region_coordinate[target] = _REGIONS[region][0]
-                latitude_coordinate[target] = latitude[rule.latitude_index]
-                longitude_coordinate[target] = longitude[rule.grid_indices]
-                offset += count
-        return (
-            output,
-            region_coordinate,
-            latitude_coordinate,
-            longitude_coordinate,
-        )
+                output[
+                    :, region, rule.latitude_index, rule.grid_indices
+                ] = height[:, rule.grid_nodes]
+        return output
 
     @staticmethod
     def _interpolation_rule(
@@ -834,6 +1168,17 @@ class GlobalRossbyModel:
     ) -> np.ndarray:
         """Interpolate both boundaries and retain interior grid values."""
         interior = field[:, rule.interior]
+        if isinstance(field, da.Array):
+            boundaries = []
+            for low, high, weight in (rule.west, rule.east):
+                boundaries.append(
+                    field[:, low]
+                    + weight * (field[:, high] - field[:, low])
+                )
+            return da.concatenate(
+                (boundaries[0][:, None], interior, boundaries[1][:, None]),
+                axis=1,
+            )
         output = np.empty(
             (field.shape[0], interior.shape[1] + 2), dtype=field.dtype
         )
@@ -853,6 +1198,25 @@ class GlobalRossbyModel:
         my: np.ndarray, quadrature, latitude_size: int
     ) -> np.ndarray:
         """Integrate northward Ekman transport across each region."""
+        if isinstance(my, da.Array):
+            zero = da.zeros_like(my[:, 0, 0])
+            regions = []
+            for rules in quadrature:
+                rows = {rule.latitude_index: rule for rule in rules}
+                values = []
+                for latitude_index in range(latitude_size):
+                    rule = rows.get(latitude_index)
+                    if rule is None:
+                        values.append(zero)
+                        continue
+                    field = GlobalRossbyModel._field_on_zonal_grid(
+                        my[:, latitude_index, :], rule
+                    )
+                    values.append(
+                        da.sum(field * rule.weights[None, :], axis=1)
+                    )
+                regions.append(da.stack(values, axis=1))
+            return da.stack(regions, axis=1)
         output = np.zeros(
             (my.shape[0], len(_REGIONS), latitude_size),
             dtype=np.result_type(my.dtype, np.float64),
@@ -870,6 +1234,26 @@ class GlobalRossbyModel:
     @staticmethod
     def _zonal_terms(w, omega, c, rules):
         """Integrate frequency-dependent regional wind forcing."""
+        if isinstance(w, da.Array):
+            q_f = []
+            source = []
+            dtype = np.result_type(w.dtype, np.complex64)
+            for rule in rules:
+                field = GlobalRossbyModel._field_on_zonal_grid(
+                    w[:, rule.latitude_index, :], rule
+                )
+                weighted = field * rule.weights[None, :]
+                phase = np.exp(
+                    1j
+                    * omega[:, None]
+                    * (rule.x[0] - rule.x[None, :])
+                    / c[rule.latitude_index]
+                ).astype(dtype)
+                unphased = da.sum(weighted, axis=1)
+                phased = da.sum(phase * weighted, axis=1)
+                q_f.append(phased - unphased)
+                source.append(phased / c[rule.latitude_index])
+            return da.stack(q_f, axis=1), da.stack(source, axis=1)
         q_f = np.empty((omega.size, len(rules)), dtype=complex)
         source = np.empty_like(q_f)
         for j, rule in enumerate(rules):
@@ -919,10 +1303,42 @@ class GlobalRossbyModel:
 
 def _integral_to_north(values: np.ndarray, coordinate: np.ndarray) -> np.ndarray:
     """Trapezoidal integral from each coordinate to the northern endpoint."""
+    if isinstance(values, da.Array):
+        values = values.rechunk({1: -1})
+        increments = (
+            0.5
+            * (values[:, :-1] + values[:, 1:])
+            * np.diff(coordinate)[None, :]
+        )
+        return da.concatenate(
+            (
+                da.cumsum(increments[:, ::-1], axis=1)[:, ::-1],
+                da.zeros(
+                    (values.shape[0], 1),
+                    chunks=(values.chunks[0], 1),
+                    dtype=np.result_type(values.dtype, np.complex64),
+                ),
+            ),
+            axis=1,
+        )
     result = np.zeros_like(values, dtype=complex)
     increments = 0.5 * (values[:, :-1] + values[:, 1:]) * np.diff(coordinate)[None, :]
     result[:, :-1] = np.cumsum(increments[:, ::-1], axis=1)[:, ::-1]
     return result
+
+
+def _pad_active_latitudes(
+    values: da.Array, indices: np.ndarray, latitude_size: int
+) -> da.Array:
+    """Pad one contiguous active-latitude array with lazy NaNs."""
+    south = int(indices[0])
+    north = latitude_size - int(indices[-1]) - 1
+    return da.pad(
+        values,
+        ((0, 0), (south, north)),
+        mode="constant",
+        constant_values=np.nan,
+    )
 
 
 def _rossby_speed(

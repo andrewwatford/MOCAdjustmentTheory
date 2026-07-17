@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 import xarray as xr
+from dask.array import Array
+from dask.callbacks import Callback
 
 import moc_adjustment_theory.global_rossby as global_rossby
 from moc_adjustment_theory import (
@@ -105,12 +107,10 @@ def test_unforced_wind_solution_closes_regional_budgets():
     assert np.all(np.isfinite(h_b))
     np.testing.assert_allclose(np.abs(h_b), abs(result.h_e.sel(region="north_atlantic").isel(omega=1)))
 
-    h = result.h.where(
-        result.height_region == "north_atlantic", drop=True
-    ).isel(omega=1)
-    assert h.dims == ("height_point",)
-    for latitude in np.unique(h.height_latitude):
-        row = h.where(h.height_latitude == latitude, drop=True)
+    h = result.h.sel(region="north_atlantic").isel(omega=1)
+    assert h.dims == ("latitude", "longitude")
+    for latitude in h.dropna("latitude", how="all").latitude.values:
+        row = h.sel(latitude=latitude).dropna("longitude")
         assert row.size
         np.testing.assert_allclose(
             row[-1], result.h_e.sel(region="north_atlantic").isel(omega=1)
@@ -119,7 +119,7 @@ def test_unforced_wind_solution_closes_regional_budgets():
                 * global_rossby.EARTH_RADIUS_M
                 * np.cos(np.deg2rad(latitude))
                 * np.deg2rad(
-                    row.height_longitude[-1].item()
+                    row.longitude[-1].item()
                     - geometry().x_eA.sel(latitude=latitude).item()
                 )
                 / global_rossby._rossby_speed(
@@ -190,11 +190,9 @@ def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
         h_b = result.h_b.sel(region=region).isel(omega=1).dropna("latitude")
         assert h_b.size and np.all(np.isfinite(h_b))
 
-        field = result.h.where(
-            result.height_region == region, drop=True
-        ).isel(omega=1)
-        for latitude in np.unique(field.height_latitude):
-            row = field.where(field.height_latitude == latitude, drop=True)
+        field = result.h.sel(region=region).isel(omega=1)
+        for latitude in field.dropna("latitude", how="all").latitude.values:
+            row = field.sel(latitude=latitude).dropna("longitude")
             np.testing.assert_allclose(
                 row[0], h_b.sel(latitude=latitude), rtol=1e-12, atol=1e-12
             )
@@ -212,14 +210,12 @@ def test_height_field_uses_grid_points_between_off_grid_boundaries():
     shifted["x_eA"] = shifted.x_eA + 5.0
 
     result = GlobalRossbyModel(shifted, 0.02)._solve_frequency(forcing())
-    field = result.h.where(
-        result.height_region == "north_atlantic", drop=True
-    ).isel(omega=1)
+    field = result.h.sel(region="north_atlantic").isel(omega=1)
 
-    for latitude in np.unique(field.height_latitude):
-        row = field.where(field.height_latitude == latitude, drop=True)
-        assert row.height_longitude[0] == -60.0
-        assert row.height_longitude[-1] == 10.0
+    for latitude in field.dropna("latitude", how="all").latitude.values:
+        row = field.sel(latitude=latitude).dropna("longitude")
+        assert row.longitude[0] == -60.0
+        assert row.longitude[-1] == 10.0
         speed = global_rossby._rossby_speed(
             np.asarray([latitude]), 0.02, 1000.0
         )[0]
@@ -230,7 +226,7 @@ def test_height_field_uses_grid_points_between_off_grid_boundaries():
             * forcing().omega[1].item()
             * global_rossby.EARTH_RADIUS_M
             * np.cos(np.deg2rad(latitude))
-            * np.deg2rad(row.height_longitude - 15.0)
+            * np.deg2rad(row.longitude - 15.0)
             / speed
         )
         np.testing.assert_allclose(row, expected)
@@ -283,18 +279,41 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     np.testing.assert_array_equal(result.time, input_forcing.time)
     assert result.h_e.dims == ("time", "region")
     assert result.T.dims == ("time", "region", "latitude")
-    assert result.h.dims == ("time", "height_point")
-    assert {
-        "height_region",
-        "height_latitude",
-        "height_longitude",
-    }.issubset(result.h.coords)
+    assert result.h.dims == (
+        "time",
+        "region",
+        "latitude",
+        "longitude",
+    )
     assert float(
         result.T.sel(region="north_atlantic").dropna("latitude").latitude[-1]
     ) == 60.0
     np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
     for name in result.data_vars:
         assert np.all(np.isfinite(result[name].fillna(0)))
+
+
+def test_solve_builds_all_outputs_lazily() -> None:
+    """Constructing the model result must not execute graph tasks."""
+    executed = []
+    with Callback(pretask=lambda key, graph, state: executed.append(key)):
+        result = GlobalRossbyModel(geometry(), 0.02).solve(
+            temporal_forcing(),
+            pad_length=0,
+            sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
+        )
+
+    assert executed == []
+    assert all(
+        isinstance(array.data, Array)
+        for array in result.data_vars.values()
+    )
+    assert result.h.dims == (
+        "time",
+        "region",
+        "latitude",
+        "longitude",
+    )
 
 
 def test_height_field_retains_float32_spatial_precision() -> None:
