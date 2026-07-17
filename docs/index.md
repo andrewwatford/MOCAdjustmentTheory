@@ -35,12 +35,9 @@ The theory stops at $y_S$, near the southern tip of South America. It does not
 model the Southern Ocean as an additional connected basin.
 
 The eastern-boundary thickness anomaly has only three independent values:
-
-```text
-h_eA : region 1
-h_eI : regions 2 and 4
-h_eP : regions 3 and 5
-```
+$h_e^{(A)}$ for region 1, $h_e^{(I)}$ for regions 2 and 4, and $h_e^{(P)}$
+for regions 3 and 5. The index on $h_e^{(j)}$ therefore denotes either a
+region or an ocean, according to context.
 
 The western-boundary thickness anomaly, just outside the assumed-small western
 boundary current, is computed region by region:
@@ -94,9 +91,9 @@ Flow between regions 5 and 3, and between regions 4 and 2, is a combination of
 geostrophic and Ekman terms:
 
 $$
-T_I=T_{I,\mathrm{Ek}}+\kappa_I(h_I-h_A),
+T_I=T_{I,\mathrm{Ek}}+\kappa_I\left(h_e^{(I)}-h_e^{(A)}\right),
 \qquad
-T_P=T_{P,\mathrm{Ek}}+\kappa_P(h_P-h_I),
+T_P=T_{P,\mathrm{Ek}}+\kappa_P\left(h_e^{(P)}-h_e^{(I)}\right),
 $$
 
 where
@@ -115,7 +112,11 @@ r_1+\kappa_I & r_4+\kappa_P-\kappa_I & r_5-\kappa_P \\
 -\kappa_I & r_2+\kappa_I & 0 \\
 0 & -\kappa_P & r_3+\kappa_P
 \end{bmatrix}
-\begin{bmatrix}h_A\\h_I\\h_P\end{bmatrix}
+\begin{bmatrix}
+\widehat h_e^{(A)}\\
+\widehat h_e^{(I)}\\
+\widehat h_e^{(P)}
+\end{bmatrix}
 =
 \begin{bmatrix}
 F_1+F_4+F_5+T_N+T_{I,\mathrm{Ek}}+T_{P,\mathrm{Ek}}-T_S\\
@@ -123,6 +124,17 @@ F_2-T_{I,\mathrm{Ek}}\\
 F_3-T_{P,\mathrm{Ek}}
 \end{bmatrix}.
 $$
+
+At zero frequency, zero-mean forcing leaves one part of this system
+undetermined: adding the same constant to $\widehat h_e^{(A)}(0)$,
+$\widehat h_e^{(I)}(0)$, and $\widehat h_e^{(P)}(0)$ does not change any
+thickness difference or transport. The solver chooses this common offset to be
+zero, so the three zero-frequency $h_e$ coefficients vanish. Equivalently,
+$h_e$ has zero mean over the full padded FFT interval. This does not require
+the returned time series to have zero sample mean after the padded solution is
+cropped to the original time coordinate. A nonzero absolute mean thickness
+would require an additional volume or initial condition that is not part of
+the forcing dataset.
 
 The partial regional budget gives total transport at any supported latitude:
 
@@ -136,9 +148,9 @@ $$
 With $T=T_{\mathrm{Ek}}+T_g$, the western thickness follows from
 
 $$
-T_g=\frac{g'H}{f}(h_e-h_w),
+T_g^{(j)}=\frac{g'H}{f}\left(h_e^{(j)}-h_w^{(j)}\right),
 \qquad
-h_w=h_e-\frac{fT_g}{g'H}.
+h_w^{(j)}=h_e^{(j)}-\frac{fT_g^{(j)}}{g'H}.
 $$
 
 ## Model interface

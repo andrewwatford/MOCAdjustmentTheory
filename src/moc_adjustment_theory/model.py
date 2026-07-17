@@ -182,8 +182,13 @@ class GlobalRossbyModel:
         ``omega``. ``T_N`` must carry its prescribed boundary latitude in the
         numeric ``latitude_degrees_north`` attribute. Coordinate values are
         angular frequencies in rad s-1. A zero-frequency coefficient may be
-        present, but its forcing must be zero; its thickness gauge is set to
-        zero explicitly.
+        present, but its forcing must vanish. At zero frequency the equations
+        determine thickness differences between oceans, but not a common
+        additive thickness offset. The solver chooses that offset to be zero,
+        making ``h_e`` zero-mean over the full padded transform interval.
+        The temporal ``solve`` interface then crops the inverse transform to
+        its original time coordinate, where the returned series can have a
+        nonzero sample mean.
 
         Returns
         -------
