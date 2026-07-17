@@ -133,8 +133,10 @@ class GlobalRossbyModel:
         xarray.Dataset
             ``h_e``, ``h_b``, ``h_w``, ``h``, ``T``, ``T_g`` and ``T_Ek`` on
             the original time coordinate and the five-region model geometry.
-            ``h`` is evaluated on the forcing longitude grid and masked
-            outside each region's active boundaries.
+            ``h`` is evaluated at every active forcing-grid cell on the
+            compact ``height_point`` dimension. Its ``height_region``,
+            ``height_latitude`` and ``height_longitude`` coordinates locate
+            those cells without allocating dense inactive regional grids.
         """
         required = ("M_Ek_x", "M_Ek_y", "T_N")
         missing = set(required).difference(forcing_ds.data_vars)
@@ -178,9 +180,11 @@ class GlobalRossbyModel:
         )
         # These spatial linear operations commute with the temporal FFT.
         w_ek = self._ekman_curl(mx, my, latitude, longitude)
+        del mx
         t_ek = self._regional_ekman_transport(
             my, quadrature, latitude.size
         )
+        del my
 
         common_coords = {
             time_dim: forcing_ds[time_dim],
@@ -206,6 +210,7 @@ class GlobalRossbyModel:
             require_zero_mean=False,
             **transform_options,
         )
+        del w_ek, w_ek_array
         t_ek_hat = forward_transform(
             t_ek_array,
             require_zero_mean=False,
@@ -233,6 +238,7 @@ class GlobalRossbyModel:
         )
 
         metadata = t_n_hat.attrs[_METADATA_KEY]
+        del w_ek_hat, t_ek_hat, t_n_hat
         solution = {}
         for name, spectrum in solution_hat.data_vars.items():
             spectrum = spectrum.copy(deep=False)
@@ -244,9 +250,11 @@ class GlobalRossbyModel:
                 raise ValueError(
                     f"{name} has missing values within an active spectrum"
                 )
+            transform_input = (
+                spectrum.fillna(0.0) if bool(masked.any()) else spectrum
+            )
             restored = inverse_transform(
-                spectrum.fillna(0.0),
-                imaginary_rtol=imaginary_rtol,
+                transform_input, imaginary_rtol=imaginary_rtol
             )
             solution[name] = restored.where(~masked)
 
@@ -382,27 +390,29 @@ class GlobalRossbyModel:
 
         t_g = transport - t_ek
         h_w = h_e[:, :, None] - f[None, None, :] * t_g / gh
-        h = self._height_field(
+        h, h_region, h_latitude, h_longitude = self._height_field(
             w_ek,
             omega,
             c,
             h_e,
             quadrature,
-            latitude.size,
-            longitude_coordinate.size,
+            latitude,
+            np.asarray(longitude_coordinate.values, dtype=float),
         )
         coords = {
             "omega": omega_coordinate,
             "region": [name for name, _, _ in _REGIONS],
             "latitude": latitude_coordinate,
-            "longitude": longitude_coordinate,
+            "height_region": ("height_point", h_region),
+            "height_latitude": ("height_point", h_latitude),
+            "height_longitude": ("height_point", h_longitude),
         }
         result = xr.Dataset(
             {
                 "h_e": (("omega", "region"), h_e),
                 "h_b": (("omega", "region", "latitude"), h_b),
                 "h_w": (("omega", "region", "latitude"), h_w),
-                "h": (("omega", "region", "latitude", "longitude"), h),
+                "h": (("omega", "height_point"), h),
                 "T": (("omega", "region", "latitude"), transport),
                 "T_g": (("omega", "region", "latitude"), t_g),
                 "T_Ek": (("omega", "region", "latitude"), t_ek),
@@ -737,14 +747,23 @@ class GlobalRossbyModel:
         c: np.ndarray,
         h_e: np.ndarray,
         quadrature,
-        latitude_size: int,
-        longitude_size: int,
-    ) -> np.ndarray:
+        latitude: np.ndarray,
+        longitude: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Evaluate thickness at every forcing-grid point in each region."""
-        output = np.full(
-            (omega.size, len(_REGIONS), latitude_size, longitude_size),
-            np.nan + 0j,
+        point_count = sum(
+            rule.grid_indices.size
+            for rules in quadrature
+            for rule in rules
         )
+        output = np.empty(
+            (omega.size, point_count),
+            dtype=np.result_type(w.dtype, np.complex64),
+        )
+        region_coordinate = np.empty(point_count, dtype="U16")
+        latitude_coordinate = np.empty(point_count, dtype=float)
+        longitude_coordinate = np.empty(point_count, dtype=float)
+        offset = 0
         for region, rules in enumerate(quadrature):
             for rule in rules:
                 field = GlobalRossbyModel._field_on_zonal_grid(
@@ -778,10 +797,19 @@ class GlobalRossbyModel:
                     * integral
                     / speed
                 )
-                output[
-                    :, region, rule.latitude_index, rule.grid_indices
-                ] = height[:, rule.grid_nodes]
-        return output
+                count = rule.grid_indices.size
+                target = slice(offset, offset + count)
+                output[:, target] = height[:, rule.grid_nodes]
+                region_coordinate[target] = _REGIONS[region][0]
+                latitude_coordinate[target] = latitude[rule.latitude_index]
+                longitude_coordinate[target] = longitude[rule.grid_indices]
+                offset += count
+        return (
+            output,
+            region_coordinate,
+            latitude_coordinate,
+            longitude_coordinate,
+        )
 
     @staticmethod
     def _interpolation_rule(

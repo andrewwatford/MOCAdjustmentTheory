@@ -246,6 +246,9 @@ $w_{\mathrm{Ek}}=\nabla\mathbin{\cdot}\mathbf{M}_{\mathrm{Ek}}$.
 The output dataset contains:
 
 1. $h_e^{(j)}(t)$, $h_b^{(j)}(y,t), h_w^{(j)}(y,t),$ and $h^{(j)}(x,y,t)$ for each of the five
-   regions. The $h_e$ values repeat where regions share an ocean basin.
+   regions. The full field uses a compact `height_point` dimension with
+   `height_region`, `height_latitude`, and `height_longitude` coordinates so
+   inactive cells are not stored. The $h_e$ values repeat where regions share
+   an ocean basin.
 2. $T^{(j)}(y,t)$, $T_g^{(j)}(y,t)$, and $T_{\mathrm{Ek}}^{(j)}(y,t)$ for each
    of the five regions.
