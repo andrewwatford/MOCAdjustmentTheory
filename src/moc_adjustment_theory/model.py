@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from numbers import Real
+
 import numpy as np
 import xarray as xr
 
@@ -14,6 +16,7 @@ from .fourier import (
 
 EARTH_RADIUS_M = 6_371_000.0
 EARTH_ROTATION_S = 7.292115e-5
+_T_N_LATITUDE_ATTR = "latitude_degrees_north"
 
 _REGIONS = (
     ("north_atlantic", "x_wA", "x_eA"),
@@ -84,7 +87,8 @@ class GlobalRossbyModel:
         ----------
         forcing_ds
             Temporal Ekman transports and northern transport on a shared time
-            coordinate.
+            coordinate. ``T_N`` must have a numeric
+            ``latitude_degrees_north`` attribute specifying its boundary.
         time_dim, omega_dim
             Temporal and angular-frequency dimension names.
         pad_factor, norm
@@ -110,6 +114,7 @@ class GlobalRossbyModel:
             raise ValueError(
                 f"forcing dataset is missing: {', '.join(sorted(missing))}"
             )
+        self._northern_boundary_latitude(forcing_ds["T_N"])
 
         transform_options = {
             "time_dim": time_dim,
@@ -174,9 +179,11 @@ class GlobalRossbyModel:
 
         ``forcing_hat`` must contain complex Fourier coefficients ``M_Ek_x``
         and ``M_Ek_y`` on ``(omega, latitude, longitude)`` and ``T_N`` on
-        ``omega``. Coordinate values are angular frequencies in rad s-1.
-        A zero-frequency coefficient may be present, but its forcing must be
-        zero; its thickness gauge is set to zero explicitly.
+        ``omega``. ``T_N`` must carry its prescribed boundary latitude in the
+        numeric ``latitude_degrees_north`` attribute. Coordinate values are
+        angular frequencies in rad s-1. A zero-frequency coefficient may be
+        present, but its forcing must be zero; its thickness gauge is set to
+        zero explicitly.
 
         Returns
         -------
@@ -185,8 +192,10 @@ class GlobalRossbyModel:
             ``T_g`` and ``T_Ek`` on ``(omega, region, latitude)``. Values
             outside a region's latitude support are NaN.
         """
-        omega, latitude, longitude, mx, my, t_n = self._forcing_arrays(forcing_hat)
-        geometry = self._geometry(latitude)
+        omega, latitude, longitude, mx, my, t_n, y_n = self._forcing_arrays(
+            forcing_hat
+        )
+        geometry = self._geometry(latitude, y_n)
         lat_rad = np.deg2rad(latitude)
         lon_rad = np.deg2rad(longitude)
         cos_lat = np.cos(lat_rad)
@@ -335,9 +344,27 @@ class GlobalRossbyModel:
             dtype=complex,
         )
         t_n = np.asarray(forcing_hat.T_N.transpose("omega").values, dtype=complex)
-        return omega, latitude, longitude, mx, my, t_n
+        y_n = GlobalRossbyModel._northern_boundary_latitude(forcing_hat.T_N)
+        return omega, latitude, longitude, mx, my, t_n, y_n
 
-    def _geometry(self, latitude: np.ndarray):
+    @staticmethod
+    def _northern_boundary_latitude(t_n: xr.DataArray) -> float:
+        """Return the validated latitude at which ``T_N`` is prescribed."""
+        value = t_n.attrs.get(_T_N_LATITUDE_ATTR)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not np.isfinite(value)
+        ):
+            raise ValueError(
+                f"T_N must have a finite numeric '{_T_N_LATITUDE_ATTR}' attribute"
+            )
+        value = float(value)
+        if value < 0.0:
+            raise ValueError("T_N latitude must not fall south of the equator")
+        return value
+
+    def _geometry(self, latitude: np.ndarray, atlantic_north: float):
         """Interpolate boundaries and infer the five contiguous region supports."""
         source_lat = np.asarray(self.isobath_ds.latitude.values, dtype=float)
         support = {}
@@ -353,8 +380,13 @@ class GlobalRossbyModel:
         y_s = max(support["x_wA"][0], support["x_eP"][0])
         y_p = max(support["x_wP"][0], support["x_eI"][0])
         y_i = max(support["x_eA"][0], support["x_wI"][0])
+        atlantic_support_north = min(support["x_wA"][1], support["x_eA"][1])
+        if atlantic_north > latitude[-1]:
+            raise ValueError("forcing latitude does not reach the T_N latitude")
+        if atlantic_north > atlantic_support_north:
+            raise ValueError("Atlantic geometry does not reach the T_N latitude")
         limits = (
-            (y_i, min(support["x_wA"][1], support["x_eA"][1])),
+            (y_i, atlantic_north),
             (y_i, min(support["x_wI"][1], support["x_eI"][1])),
             (y_p, min(support["x_wP"][1], support["x_eP"][1])),
             (y_p, y_i),
