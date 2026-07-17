@@ -174,10 +174,16 @@ The forcing dataset contains three required data arrays:
 
 1. `M_Ek_x`: local Ekman transport in the $x$ direction.
 2. `M_Ek_y`: local Ekman transport in the $y$ direction.
-3. `T_N`: total transport at the northern boundary of the Atlantic basin.
+3. `T_N`: total transport at the northern boundary of the Atlantic basin. Its
+   numeric `latitude_degrees_north` attribute gives the latitude at which that
+   transport is prescribed.
 
 All three use a common time grid, which is also used for the solve. The Ekman
 transports use a latitude–longitude grid that covers the entire active domain.
+The model retains North Atlantic rows at or south of the prescribed `T_N`
+latitude, without changing the Indian or Pacific limits. The latitude must not
+fall south of the equator, and both the forcing grid and Atlantic boundary
+geometry must reach it.
 
 The user is responsible for choices concerning Ekman upwelling at the equator,
 Ekman transport into solid boundaries, and related ambiguities. Transport at

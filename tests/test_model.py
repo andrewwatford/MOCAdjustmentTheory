@@ -28,7 +28,7 @@ def geometry():
     )
 
 
-def forcing(t_n=(0.0, 1.0e6), wind=False):
+def forcing(t_n=(0.0, 1.0e6), wind=False, t_n_latitude=60.0):
     omega = np.array([0.0, 1.0e-6])
     latitude = np.arange(-50.0, 71.0, 10.0)
     longitude = np.arange(-80.0, 291.0, 10.0)
@@ -48,6 +48,7 @@ def forcing(t_n=(0.0, 1.0e6), wind=False):
     if wind:
         profile = 1.0 + (latitude[:, None] + 50.0) / 120.0
         dataset["M_Ek_y"][1] = (2.0 + 0.5j) * profile
+    dataset.T_N.attrs["latitude_degrees_north"] = t_n_latitude
     return dataset
 
 
@@ -65,7 +66,7 @@ def temporal_forcing():
     latitude = np.arange(-50.0, 71.0, 10.0)
     longitude = np.arange(-80.0, 291.0, 10.0)
     zeros = np.zeros((time.size, latitude.size, longitude.size))
-    return xr.Dataset(
+    dataset = xr.Dataset(
         {
             "M_Ek_x": (("time", "latitude", "longitude"), zeros),
             "M_Ek_y": (("time", "latitude", "longitude"), zeros),
@@ -73,6 +74,8 @@ def temporal_forcing():
         },
         coords={"time": time, "latitude": latitude, "longitude": longitude},
     )
+    dataset.T_N.attrs["latitude_degrees_north"] = 60.0
+    return dataset
 
 
 def test_unforced_wind_solution_closes_regional_budgets():
@@ -109,6 +112,38 @@ def test_transition_topology_conserves_transport():
     south_3 = t.sel(region="north_pacific").dropna("latitude")[0]
     south_4 = t.sel(region="atlantic_indian").dropna("latitude")[0]
     np.testing.assert_allclose(north_5, south_3 + south_4)
+
+
+def test_northern_forcing_latitude_truncates_only_the_atlantic():
+    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(
+        forcing(t_n_latitude=55.0)
+    )
+
+    atlantic = result.T.sel(region="north_atlantic").dropna("latitude")
+    pacific = result.T.sel(region="north_pacific").dropna("latitude")
+    assert float(atlantic.latitude[-1]) == 50.0
+    assert float(pacific.latitude[-1]) == 60.0
+    np.testing.assert_allclose(atlantic.isel(omega=1, latitude=-1), 1.0e6)
+
+
+def test_northern_forcing_latitude_must_be_valid_and_covered():
+    model = GlobalRossbyModel(geometry(), 0.02)
+
+    with pytest.raises(ValueError, match="south of the equator"):
+        model.solve_frequency(forcing(t_n_latitude=-1.0))
+    with pytest.raises(ValueError, match="forcing latitude does not reach"):
+        model.solve_frequency(forcing(t_n_latitude=80.0))
+
+    missing = forcing()
+    missing.T_N.attrs.clear()
+    with pytest.raises(ValueError, match="finite numeric"):
+        model.solve_frequency(missing)
+
+    short_geometry = geometry().where(geometry().latitude <= 60.0)
+    with pytest.raises(ValueError, match="Atlantic geometry does not reach"):
+        GlobalRossbyModel(short_geometry, 0.02).solve_frequency(
+            forcing(t_n_latitude=70.0)
+        )
 
 
 def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
@@ -171,6 +206,9 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     np.testing.assert_array_equal(result.time, input_forcing.time)
     assert result.h_e.dims == ("time", "region")
     assert result.T.dims == ("time", "region", "latitude")
+    assert float(
+        result.T.sel(region="north_atlantic").dropna("latitude").latitude[-1]
+    ) == 60.0
     np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
     for name in result.data_vars:
         assert np.all(np.isfinite(result[name].fillna(0)))
