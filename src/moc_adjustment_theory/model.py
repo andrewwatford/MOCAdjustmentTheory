@@ -1,4 +1,4 @@
-"""Frequency-domain global adjustment model."""
+"""Frequency-domain global Rossby model."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ _REGIONS = (
 )
 
 
-class GlobalAdjustmentModel:
+class GlobalRossbyModel:
     """Solve the global reduced-gravity adjustment theory.
 
     Parameters

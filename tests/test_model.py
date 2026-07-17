@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from moc_adjustment_theory import GlobalAdjustmentModel
+from moc_adjustment_theory import GlobalRossbyModel
 
 
 def geometry():
@@ -76,7 +76,7 @@ def temporal_forcing():
 
 
 def test_unforced_wind_solution_closes_regional_budgets():
-    result = GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(forcing())
+    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing())
 
     assert set(result.data_vars) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
     assert result.h_e.dims == ("omega", "region")
@@ -97,7 +97,7 @@ def test_unforced_wind_solution_closes_regional_budgets():
 
 
 def test_transition_topology_conserves_transport():
-    result = GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(forcing())
+    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing())
     t = result.T.isel(omega=1)
 
     north_4 = t.sel(region="atlantic_indian").dropna("latitude")[-1]
@@ -112,7 +112,7 @@ def test_transition_topology_conserves_transport():
 
 
 def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
-    result = GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(
+    result = GlobalRossbyModel(geometry(), 0.02).solve_frequency(
         forcing(t_n=(0.0, 0.0), wind=True)
     )
 
@@ -132,7 +132,7 @@ def test_boundary_solution_satisfies_three_basin_system():
     r = np.array([[2 + 3j, 3 + 4j, 4 + 5j, 5 + 6j, 6 + 7j]])
     t_n, t_i, t_p, t_s = (np.array([value + 0j]) for value in (7, 8, 9, 10))
     k_i, k_p = -20.0, -30.0
-    h = GlobalAdjustmentModel._solve_boundaries(
+    h = GlobalRossbyModel._solve_boundaries(
         omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p
     )[0]
     matrix = np.array(
@@ -154,7 +154,7 @@ def test_boundary_solution_satisfies_three_basin_system():
 
 def test_nonzero_dc_forcing_is_rejected():
     with pytest.raises(ValueError, match="zero-frequency forcing"):
-        GlobalAdjustmentModel(geometry(), 0.02).solve_frequency(forcing(t_n=(1.0, 0.0)))
+        GlobalRossbyModel(geometry(), 0.02).solve_frequency(forcing(t_n=(1.0, 0.0)))
 
 
 def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
@@ -162,7 +162,7 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     input_forcing = temporal_forcing()
     spacing = 365.25 / 12 * 24 * 60 * 60
 
-    result = GlobalAdjustmentModel(geometry(), 0.02).solve(
+    result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         sample_spacing_seconds=spacing,
     )
@@ -183,7 +183,7 @@ def test_solve_infers_daily_spacing() -> None:
         + np.arange(4) * np.timedelta64(1, "D")
     )
 
-    result = GlobalAdjustmentModel(geometry(), 0.02).solve(
+    result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         omega_dim="angular_frequency",
     )
