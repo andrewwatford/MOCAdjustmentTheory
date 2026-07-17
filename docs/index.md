@@ -187,10 +187,9 @@ and twice the stated order. Consequently, `cutoff_omega` is the single-pass
 $-3$ dB angular frequency in rad s$^{-1}$ and the final amplitude there is
 $1/2$. Numeric variables containing the selected time dimension are filtered,
 while other dataset variables and complete-series spatial masks are preserved.
-Odd reflection is used at both endpoints with SciPy's standard padding length;
-`pad_length` may override the number of reflected samples at each end. Padding
-reduces but cannot eliminate endpoint transients, so conclusions that depend on
-the record ends should be checked for sensitivity to this choice.
+Odd reflection is used at both endpoints with SciPy's standard padding length.
+Padding reduces but cannot eliminate endpoint transients, so conclusions that
+depend on the record ends should be treated cautiously.
 
 ### Active-layer dataset
 

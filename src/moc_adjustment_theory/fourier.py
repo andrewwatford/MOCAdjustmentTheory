@@ -204,7 +204,6 @@ def butterworth_filter(
     order: int = 4,
     time_dim: str = "time",
     sample_spacing_seconds: float | None = None,
-    pad_length: int | None = None,
 ) -> xr.DataArray | xr.Dataset:
     """Apply a zero-phase low-pass Butterworth filter along time.
 
@@ -217,10 +216,8 @@ def butterworth_filter(
     For a `Dataset`, every numeric data variable containing ``time_dim`` is
     filtered; other variables are preserved. Spatial locations that are NaN for
     the complete time series remain masked, while partial gaps are rejected.
-    Odd reflection is used at both endpoints. With ``pad_length=None``, SciPy's
-    standard `sosfiltfilt` padding length is used; an integer overrides the
-    number of samples reflected at each end. Coordinates, names, and attributes
-    are preserved.
+    Odd reflection and SciPy's standard `sosfiltfilt` padding length are used at
+    both endpoints. Coordinates, names, and attributes are preserved.
 
     ``sample_spacing_seconds`` has the same calendar-label semantics as
     `forward_transform`. In particular, monthly samples may be represented by
@@ -242,11 +239,6 @@ def butterworth_filter(
     if not isinstance(time_dim, str) or not time_dim:
         raise TypeError("time_dim must be a nonempty string")
     _validate_sample_spacing(sample_spacing_seconds)
-    if pad_length is not None:
-        if isinstance(pad_length, bool) or not isinstance(pad_length, int):
-            raise TypeError("pad_length must be an integer or None")
-        if pad_length < 0:
-            raise ValueError("pad_length must be nonnegative")
     if time_dim not in data.dims:
         raise ValueError(f"data must have a {time_dim!r} dimension")
 
@@ -269,7 +261,6 @@ def butterworth_filter(
             data,
             sections,
             time_dim,
-            pad_length,
         )
 
     variables = {}
@@ -279,7 +270,6 @@ def butterworth_filter(
                 variable,
                 sections,
                 time_dim,
-                pad_length,
             )
         else:
             variables[name] = variable
@@ -290,7 +280,6 @@ def _butterworth_dataarray(
     data: xr.DataArray,
     sections: np.ndarray,
     time_dim: str,
-    pad_length: int | None,
 ) -> xr.DataArray:
     """Filter one numeric array while retaining complete-series masks."""
     if not np.issubdtype(data.dtype, np.number):
@@ -307,14 +296,11 @@ def _butterworth_dataarray(
 
     expanded_mask = np.expand_dims(fully_missing, axis=axis)
     working = np.where(expanded_mask, 0.0, values)
-    if pad_length is not None and pad_length >= data.sizes[time_dim] - 1:
-        raise ValueError("pad_length must be smaller than the time series")
     filtered = sosfiltfilt(
         sections,
         working,
         axis=axis,
         padtype="odd",
-        padlen=pad_length,
     )
     filtered = np.where(expanded_mask, np.nan, filtered)
     return data.copy(data=filtered)
