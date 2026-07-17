@@ -285,6 +285,13 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         "latitude",
         "longitude",
     )
+    subset = result.h.isel(
+        time=0,
+        region=0,
+        latitude=slice(0, 2),
+        longitude=slice(0, 2),
+    )
+    assert np.prod(subset.data.numblocks) < np.prod(result.h.data.numblocks)
     assert float(
         result.T.sel(region="north_atlantic").dropna("latitude").latitude[-1]
     ) == 60.0

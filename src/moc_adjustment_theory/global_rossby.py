@@ -8,6 +8,7 @@ from typing import NamedTuple
 import dask.array as da
 import numpy as np
 import xarray as xr
+from dask import delayed
 
 from .fourier import (
     _METADATA_KEY,
@@ -26,6 +27,7 @@ EARTH_ROTATION_S = 7.292115e-5
 _T_N_LATITUDE_ATTR = "latitude_degrees_north"
 _INPUT_LATITUDE_CHUNK = 64
 _INPUT_LONGITUDE_CHUNK = 128
+_HEIGHT_LATITUDE_CHUNK = 8
 _OUTPUT_TIME_CHUNK = 12
 
 _REGIONS = (
@@ -103,6 +105,10 @@ class GlobalRossbyModel:
         The three forcing variables ``M_Ek_x``, ``M_Ek_y`` and ``T_N`` are
         combined into Ekman diagnostics, transformed with one explicit
         contract, and inverse transformed onto their original time coordinate.
+        All forcing-dependent calculations are represented as a Dask graph;
+        this method returns without loading the full forcing or computing any
+        output values. Callers may compute a subset, persist selected results,
+        or stream the dataset to a chunked store.
         ``sample_spacing_seconds`` supplies a physical sample
         interval when increasing calendar labels are not uniformly separated;
         monthly forcing in this project uses ``365.25 / 12`` days. All other
@@ -140,10 +146,10 @@ class GlobalRossbyModel:
         xarray.Dataset
             ``h_e``, ``h_b``, ``h_w``, ``h``, ``T``, ``T_g`` and ``T_Ek`` on
             the original time coordinate and the five-region model geometry.
-            ``h`` is evaluated at every active forcing-grid cell on the
-            compact ``height_point`` dimension. Its ``height_region``,
-            ``height_latitude`` and ``height_longitude`` coordinates locate
-            those cells without allocating dense inactive regional grids.
+            Every numerical variable is Dask-backed. ``h`` has dimensions
+            ``(time, region, latitude, longitude)`` and is NaN outside each
+            region. Other fields use their documented lower-dimensional
+            coordinates.
         """
         required = ("M_Ek_x", "M_Ek_y", "T_N")
         missing = set(required).difference(forcing_ds.data_vars)
@@ -259,6 +265,7 @@ class GlobalRossbyModel:
             restored = inverse_transform(
                 transform_input, imaginary_rtol=imaginary_rtol
             )
+            restored = restored.where(~masked)
             if isinstance(restored.data, da.Array):
                 chunk_map = {time_dim: _OUTPUT_TIME_CHUNK}
                 if "region" in restored.dims:
@@ -268,7 +275,7 @@ class GlobalRossbyModel:
                 if "longitude" in restored.dims:
                     chunk_map["longitude"] = _INPUT_LONGITUDE_CHUNK
                 restored = restored.chunk(chunk_map)
-            solution[name] = restored.where(~masked)
+            solution[name] = restored
 
         result = xr.Dataset(solution)
         result.attrs.update(
@@ -328,6 +335,13 @@ class GlobalRossbyModel:
         c = _rossby_speed(latitude, self.g_prime, depth)
         latitude_size = latitude.size
 
+        # The two zonal source terms share the same forcing rows and phases.
+        # Build them together in latitude blocks so the Dask graph references
+        # each full-longitude forcing block only once.
+        q_full, source_full = self._zonal_terms_lazy(
+            w_ek, omega, c, quadrature, latitude_size
+        )
+
         active_mask = np.zeros((len(_REGIONS), latitude_size), dtype=bool)
         f_regions = []
         r_regions = []
@@ -336,9 +350,8 @@ class GlobalRossbyModel:
         for region in range(len(_REGIONS)):
             indices, x_w, x_e = geometry[region]
             active_mask[region, indices] = True
-            q_f, source = self._zonal_terms(
-                w_ek, omega, c, quadrature[region]
-            )
+            q_f = q_full[:, region, indices]
+            source = source_full[:, region, indices]
             dy = EARTH_RADIUS_M * np.deg2rad(latitude[indices])
             f_region = _integral_to_north(q_f, dy)
             phase_e = np.exp(
@@ -523,76 +536,54 @@ class GlobalRossbyModel:
         latitude_size: int,
         longitude_size: int,
     ) -> da.Array:
-        """Build a lazy dense height spectrum from regional active rows."""
+        """Build lazy dense height spectra in full-longitude latitude blocks.
+
+        Each output block contains eight latitudes for one region. A block
+        needs complete longitude rows because the height at a point depends on
+        the forcing integral from that point to the eastern boundary. The
+        returned graph is later split into normal output chunks without ever
+        constructing a dense in-memory global spectrum.
+        """
         dtype = np.result_type(w.dtype, np.complex64)
-        real_dtype = np.empty((), dtype=dtype).real.dtype
-        blank = da.full(
-            (omega.size, longitude_size),
-            np.nan,
-            chunks=(omega.size, _INPUT_LONGITUDE_CHUNK),
-            dtype=dtype,
-        )
+        # A small latitude chunk bounds each full-longitude task to roughly
+        # tens of megabytes at the supplied native resolution.
+        zonal = w.rechunk({0: -1, 1: _HEIGHT_LATITUDE_CHUNK, 2: -1})
+        latitude_chunks = zonal.chunks[1]
+        source_blocks = zonal.to_delayed().reshape(
+            1, len(latitude_chunks), 1
+        )[0, :, 0]
+        h_e_block = h_e.rechunk({0: -1, 1: -1}).to_delayed().reshape(
+            1, 1
+        )[0, 0]
         regions = []
-        for region, rules in enumerate(quadrature):
-            by_latitude = {rule.latitude_index: rule for rule in rules}
-            rows = []
-            for latitude_index in range(latitude_size):
-                rule = by_latitude.get(latitude_index)
-                if rule is None:
-                    rows.append(blank)
-                    continue
-                field = GlobalRossbyModel._field_on_zonal_grid(
-                    w[:, latitude_index, :], rule
-                ).rechunk({1: -1})
-                speed = real_dtype.type(c[latitude_index])
-                phase_basis = np.exp(
-                    -1j * omega[:, None] * rule.x[None, :] / speed
-                ).astype(dtype)
-                integrand = field * phase_basis
-                increments = (
-                    0.5
-                    * (integrand[:, :-1] + integrand[:, 1:])
-                    * np.diff(rule.x).astype(real_dtype)[None, :]
+        for region in range(len(_REGIONS)):
+            output_blocks = []
+            latitude_start = 0
+            for source, latitude_count in zip(
+                source_blocks, latitude_chunks
+            ):
+                block = delayed(_height_spectral_block)(
+                    source,
+                    h_e_block,
+                    region,
+                    latitude_start,
+                    quadrature[region],
+                    omega,
+                    c,
+                    longitude_size,
+                    dtype,
                 )
-                integral = da.concatenate(
-                    (
-                        da.cumsum(increments[:, ::-1], axis=1)[
-                            :, ::-1
-                        ],
-                        da.zeros(
-                            (omega.size, 1),
-                            chunks=(omega.size, 1),
-                            dtype=dtype,
-                        ),
-                    ),
-                    axis=1,
-                )
-                phase = np.exp(
-                    1j
-                    * omega[:, None]
-                    * (rule.x[None, :] - rule.x[-1])
-                    / speed
-                ).astype(dtype)
-                height = (
-                    h_e[:, region, None].astype(dtype) * phase
-                    - np.exp(
-                        1j * omega[:, None] * rule.x[None, :] / speed
-                    ).astype(dtype)
-                    * integral
-                    / speed
-                )
-                active = height[:, rule.grid_nodes]
-                west = int(rule.grid_indices[0])
-                east = longitude_size - int(rule.grid_indices[-1]) - 1
-                rows.append(
-                    da.pad(
-                        active,
-                        ((0, 0), (west, east)),
-                        mode="constant",
-                        constant_values=np.nan,
+                output_blocks.append(
+                    da.from_delayed(
+                        block,
+                        shape=(omega.size, latitude_count, longitude_size),
+                        dtype=dtype,
                     )
                 )
-            regions.append(da.stack(rows, axis=1))
+                latitude_start += latitude_count
+            regions.append(da.concatenate(output_blocks, axis=1))
+        if sum(latitude_chunks) != latitude_size:
+            raise RuntimeError("lazy height-field latitude shape is inconsistent")
         return da.stack(regions, axis=1).rechunk(
             {
                 0: -1,
@@ -1199,24 +1190,33 @@ class GlobalRossbyModel:
     ) -> np.ndarray:
         """Integrate northward Ekman transport across each region."""
         if isinstance(my, da.Array):
-            zero = da.zeros_like(my[:, 0, 0])
-            regions = []
-            for rules in quadrature:
-                rows = {rule.latitude_index: rule for rule in rules}
-                values = []
-                for latitude_index in range(latitude_size):
-                    rule = rows.get(latitude_index)
-                    if rule is None:
-                        values.append(zero)
-                        continue
-                    field = GlobalRossbyModel._field_on_zonal_grid(
-                        my[:, latitude_index, :], rule
+            # Every zonal quadrature spans a complete basin width. Rechunking
+            # longitude once lets each delayed latitude block perform all five
+            # regional reductions without constructing one graph layer per row.
+            zonal = my.rechunk({0: -1, 2: -1})
+            latitude_chunks = zonal.chunks[1]
+            source_blocks = zonal.to_delayed().reshape(
+                1, len(latitude_chunks), 1
+            )[0, :, 0]
+            output_blocks = []
+            latitude_start = 0
+            for source, latitude_count in zip(
+                source_blocks, latitude_chunks
+            ):
+                block = delayed(_regional_ekman_block)(
+                    source,
+                    latitude_start,
+                    quadrature,
+                )
+                output_blocks.append(
+                    da.from_delayed(
+                        block,
+                        shape=(my.shape[0], len(_REGIONS), latitude_count),
+                        dtype=np.result_type(my.dtype, np.float64),
                     )
-                    values.append(
-                        da.sum(field * rule.weights[None, :], axis=1)
-                    )
-                regions.append(da.stack(values, axis=1))
-            return da.stack(regions, axis=1)
+                )
+                latitude_start += latitude_count
+            return da.concatenate(output_blocks, axis=2)
         output = np.zeros(
             (my.shape[0], len(_REGIONS), latitude_size),
             dtype=np.result_type(my.dtype, np.float64),
@@ -1274,6 +1274,57 @@ class GlobalRossbyModel:
         return q_f, source
 
     @staticmethod
+    def _zonal_terms_lazy(
+        w: da.Array,
+        omega: np.ndarray,
+        c: np.ndarray,
+        quadrature,
+        latitude_size: int,
+    ) -> tuple[da.Array, da.Array]:
+        """Return lazy zonal budget terms on ``(omega, region, latitude)``.
+
+        Longitude is rechunked to one block because every regional integral
+        spans from its interpolated western boundary to its eastern boundary.
+        Each delayed task handles all regions for a latitude block, avoiding
+        thousands of nearly identical row-level graph layers.
+        """
+        zonal = w.rechunk({0: -1, 2: -1})
+        latitude_chunks = zonal.chunks[1]
+        source_blocks = zonal.to_delayed().reshape(
+            1, len(latitude_chunks), 1
+        )[0, :, 0]
+        output_blocks = []
+        latitude_start = 0
+        dtype = np.result_type(w.dtype, np.float64, np.complex64)
+        for source, latitude_count in zip(
+            source_blocks, latitude_chunks
+        ):
+            block = delayed(_zonal_terms_spectral_block)(
+                source,
+                latitude_start,
+                quadrature,
+                omega,
+                c,
+            )
+            output_blocks.append(
+                da.from_delayed(
+                    block,
+                    shape=(
+                        2,
+                        omega.size,
+                        len(_REGIONS),
+                        latitude_count,
+                    ),
+                    dtype=dtype,
+                )
+            )
+            latitude_start += latitude_count
+        terms = da.concatenate(output_blocks, axis=3)
+        if terms.shape[3] != latitude_size:
+            raise RuntimeError("lazy zonal-term latitude shape is inconsistent")
+        return terms[0], terms[1]
+
+    @staticmethod
     def _solve_boundaries(omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p):
         """Solve the three-basin boundary-thickness system at each frequency."""
         h = np.zeros((omega.size, 3), dtype=complex)
@@ -1299,6 +1350,173 @@ class GlobalRossbyModel:
             )
             h[n] = np.linalg.solve(matrix, rhs[n])
         return h
+
+
+def _regional_ekman_block(
+    my_values: np.ndarray,
+    latitude_start: int,
+    quadrature,
+) -> np.ndarray:
+    """Integrate Ekman transport for one complete-longitude latitude block.
+
+    Parameters
+    ----------
+    my_values
+        Northward Ekman transport on ``(time, block_latitude, longitude)``.
+        Longitude is complete; latitude is one Dask chunk.
+    latitude_start
+        Global index of the block's first latitude.
+    quadrature
+        Precomputed rules for every model region.
+
+    Returns
+    -------
+    numpy.ndarray
+        Regional integrals on ``(time, region, block_latitude)``. Rows outside
+        a region are zero here and are masked after the spectral solve.
+    """
+    latitude_count = my_values.shape[1]
+    output = np.zeros(
+        (my_values.shape[0], len(_REGIONS), latitude_count),
+        dtype=np.result_type(my_values.dtype, np.float64),
+    )
+    latitude_stop = latitude_start + latitude_count
+    for region, rules in enumerate(quadrature):
+        for rule in rules:
+            if not latitude_start <= rule.latitude_index < latitude_stop:
+                continue
+            local_latitude = rule.latitude_index - latitude_start
+            field = GlobalRossbyModel._field_on_zonal_grid(
+                my_values[:, local_latitude, :], rule
+            )
+            output[:, region, local_latitude] = np.sum(
+                field * rule.weights[None, :], axis=1
+            )
+    return output
+
+
+def _zonal_terms_spectral_block(
+    w_values: np.ndarray,
+    latitude_start: int,
+    quadrature,
+    omega: np.ndarray,
+    c: np.ndarray,
+) -> np.ndarray:
+    """Evaluate both zonal forcing terms for one spectral latitude block.
+
+    The task receives complete-longitude ``w_Ek`` spectra and evaluates all
+    regional quadratures that intersect its latitude chunk. Returning both
+    the transport-budget term and height-source term together prevents Dask
+    from reading and interpolating the same forcing block twice.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array on ``(term, omega, region, block_latitude)`` where ``term=0`` is
+        ``q_f`` and ``term=1`` is the height source. Inactive entries are NaN.
+    """
+    latitude_count = w_values.shape[1]
+    dtype = np.result_type(w_values.dtype, np.float64, np.complex64)
+    output = np.full(
+        (2, omega.size, len(_REGIONS), latitude_count),
+        np.nan + 0j,
+        dtype=dtype,
+    )
+    latitude_stop = latitude_start + latitude_count
+    for region, rules in enumerate(quadrature):
+        for rule in rules:
+            if not latitude_start <= rule.latitude_index < latitude_stop:
+                continue
+            local_latitude = rule.latitude_index - latitude_start
+            field = GlobalRossbyModel._field_on_zonal_grid(
+                w_values[:, local_latitude, :], rule
+            )
+            weighted = field * rule.weights[None, :]
+            phase = np.exp(
+                1j
+                * omega[:, None]
+                * (rule.x[0] - rule.x[None, :])
+                / c[rule.latitude_index]
+            )
+            unphased = np.sum(weighted, axis=1)
+            phased = np.sum(phase * weighted, axis=1)
+            output[0, :, region, local_latitude] = phased - unphased
+            output[1, :, region, local_latitude] = (
+                phased / c[rule.latitude_index]
+            )
+    return output
+
+
+def _height_spectral_block(
+    w_values: np.ndarray,
+    h_e_values: np.ndarray,
+    region: int,
+    latitude_start: int,
+    rules: list[_ZonalRule],
+    omega: np.ndarray,
+    c: np.ndarray,
+    longitude_size: int,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Evaluate dense height spectra for one region and latitude block.
+
+    ``w_values`` contains complete longitude rows, which are required by the
+    cumulative integral from each evaluation point to the eastern boundary.
+    Only active regional cells are filled; all other longitudes and inactive
+    latitudes remain NaN. The spatial forcing precision controls ``dtype`` so
+    native float32 forcing produces complex64 spectra and float32 time output.
+    """
+    dtype = np.dtype(dtype)
+    real_dtype = np.empty((), dtype=dtype).real.dtype
+    latitude_count = w_values.shape[1]
+    output = np.full(
+        (omega.size, latitude_count, longitude_size),
+        np.nan + 0j,
+        dtype=dtype,
+    )
+    latitude_stop = latitude_start + latitude_count
+    for rule in rules:
+        if not latitude_start <= rule.latitude_index < latitude_stop:
+            continue
+        local_latitude = rule.latitude_index - latitude_start
+        field = GlobalRossbyModel._field_on_zonal_grid(
+            w_values[:, local_latitude, :], rule
+        ).astype(dtype, copy=False)
+        speed = real_dtype.type(c[rule.latitude_index])
+
+        # Factoring exp(i*omega*x/c) makes all point-to-east integrals one
+        # reverse cumulative sum rather than a separate integral per point.
+        phase_basis = np.exp(
+            -1j * omega[:, None] * rule.x[None, :] / speed
+        ).astype(dtype)
+        integrand = field * phase_basis
+        increments = (
+            0.5
+            * (integrand[:, :-1] + integrand[:, 1:])
+            * np.diff(rule.x).astype(real_dtype)[None, :]
+        )
+        integral = np.zeros_like(integrand, dtype=dtype)
+        integral[:, :-1] = np.cumsum(
+            increments[:, ::-1], axis=1
+        )[:, ::-1]
+        phase = np.exp(
+            1j
+            * omega[:, None]
+            * (rule.x[None, :] - rule.x[-1])
+            / speed
+        ).astype(dtype)
+        height = (
+            h_e_values[:, region, None].astype(dtype) * phase
+            - np.exp(
+                1j * omega[:, None] * rule.x[None, :] / speed
+            ).astype(dtype)
+            * integral
+            / speed
+        )
+        output[:, local_latitude, rule.grid_indices] = height[
+            :, rule.grid_nodes
+        ]
+    return output
 
 
 def _integral_to_north(values: np.ndarray, coordinate: np.ndarray) -> np.ndarray:

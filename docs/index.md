@@ -185,6 +185,26 @@ self-conjugate Nyquist coefficient when the model applies complex propagation
 phases. An integer `pad_length` overrides the physical default and specifies
 the minimum number of zero samples to append.
 
+`solve` is Dask-native. It constructs and returns the complete model graph
+without loading the full forcing dataset or calculating any output values.
+All numerical output variables are Dask-backed, including the dense
+`h(time, region, latitude, longitude)` field. The FFT axes are temporarily
+rechunked to complete time or frequency series, while the returned data use
+12-sample time, single-region, 64-latitude, and 128-longitude chunks. A caller
+can compute only a subset or stream the complete result to a chunked store:
+
+```python
+atlantic_snapshot = solution_ds.h.sel(
+    region="north_atlantic",
+).isel(time=0).compute()
+
+solution_ds.to_zarr("solution.zarr")
+```
+
+Calling `.compute()` or `.values` on the entire dense height field necessarily
+materializes its full logical size in memory. Writing with Dask streams chunks
+through memory instead.
+
 The standalone `forward_transform` uses the same right-padding and odd
 total-length convention. Its `pad_length` defaults to zero because a stateless
 transform has no model geometry from which to infer a crossing time;
@@ -246,9 +266,9 @@ $w_{\mathrm{Ek}}=\nabla\mathbin{\cdot}\mathbf{M}_{\mathrm{Ek}}$.
 The output dataset contains:
 
 1. $h_e^{(j)}(t)$, $h_b^{(j)}(y,t), h_w^{(j)}(y,t),$ and $h^{(j)}(x,y,t)$ for each of the five
-   regions. The full field uses a compact `height_point` dimension with
-   `height_region`, `height_latitude`, and `height_longitude` coordinates so
-   inactive cells are not stored. The $h_e$ values repeat where regions share
-   an ocean basin.
+   regions. The full field has dimensions
+   `(time, region, latitude, longitude)` and is lazily masked with NaN outside
+   each active region. The $h_e$ values repeat where regions share an ocean
+   basin.
 2. $T^{(j)}(y,t)$, $T_g^{(j)}(y,t)$, and $T_{\mathrm{Ek}}^{(j)}(y,t)$ for each
    of the five regions.
