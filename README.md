@@ -32,6 +32,9 @@ solution = model.solve(
     forcing,
     sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
 )
+
+# Every output remains lazy until a subset or complete result is requested.
+atlantic_snapshot = solution.h.sel(region="north_atlantic").isel(time=0).compute()
 ```
 
 See the [deployed documentation](https://andrewwatford.github.io/MOCAdjustmentTheory/)

@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import xarray as xr
+from dask.array import Array
 
 from moc_adjustment_theory import (
     butterworth_filter,
@@ -42,6 +43,22 @@ def test_round_trip_restores_values_coordinates_and_attributes() -> None:
     xr.testing.assert_allclose(restored, data)
     assert restored.attrs == data.attrs
     assert restored["sample"].attrs == data["sample"].attrs
+
+
+def test_lazy_round_trip_remains_dask_backed() -> None:
+    data = xr.DataArray(
+        [[1.0, -1.0, 1.0, -1.0], [2.0, 0.0, -2.0, 0.0]],
+        dims=("point", "time"),
+        coords={"time": _time()},
+    ).chunk({"point": 1, "time": 2})
+
+    spectrum = forward_transform(data)
+    restored = inverse_transform(spectrum)
+
+    assert isinstance(spectrum.data, Array)
+    assert isinstance(restored.data, Array)
+    assert spectrum.chunks[spectrum.get_axis_num("omega")] == (3,)
+    xr.testing.assert_allclose(restored.compute(), data.compute())
 
 
 def test_forward_rejects_nonzero_mean_by_default() -> None:

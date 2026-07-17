@@ -3,6 +3,8 @@
 import numpy as np
 import pytest
 import xarray as xr
+from dask.array import Array
+from dask.callbacks import Callback
 
 import moc_adjustment_theory.global_rossby as global_rossby
 from moc_adjustment_theory import (
@@ -88,7 +90,7 @@ def temporal_forcing():
 def test_unforced_wind_solution_closes_regional_budgets():
     result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(forcing())
 
-    assert set(result.data_vars) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
+    assert set(result.data_vars) == {"h_e", "h_b", "h_w", "h", "T", "T_g", "T_Ek"}
     assert result.h_e.dims == ("omega", "region")
     assert result.T.dims == ("omega", "region", "latitude")
     assert np.all(result.isel(omega=0).fillna(0) == 0)
@@ -104,6 +106,27 @@ def test_unforced_wind_solution_closes_regional_budgets():
     h_b = result.h_b.sel(region="north_atlantic").isel(omega=1).dropna("latitude")
     assert np.all(np.isfinite(h_b))
     np.testing.assert_allclose(np.abs(h_b), abs(result.h_e.sel(region="north_atlantic").isel(omega=1)))
+
+    h = result.h.sel(region="north_atlantic").isel(omega=1)
+    assert h.dims == ("latitude", "longitude")
+    for latitude in h.dropna("latitude", how="all").latitude.values:
+        row = h.sel(latitude=latitude).dropna("longitude")
+        assert row.size
+        np.testing.assert_allclose(
+            row[-1], result.h_e.sel(region="north_atlantic").isel(omega=1)
+            * np.exp(
+                1j * forcing().omega[1].item()
+                * global_rossby.EARTH_RADIUS_M
+                * np.cos(np.deg2rad(latitude))
+                * np.deg2rad(
+                    row.longitude[-1].item()
+                    - geometry().x_eA.sel(latitude=latitude).item()
+                )
+                / global_rossby._rossby_speed(
+                    np.asarray([latitude]), 0.02, 1000.0
+                )[0]
+            ),
+        )
 
 
 def test_transition_topology_conserves_transport():
@@ -167,6 +190,47 @@ def test_nonzero_ekman_forcing_produces_consistent_diagnostics():
         h_b = result.h_b.sel(region=region).isel(omega=1).dropna("latitude")
         assert h_b.size and np.all(np.isfinite(h_b))
 
+        field = result.h.sel(region=region).isel(omega=1)
+        for latitude in field.dropna("latitude", how="all").latitude.values:
+            row = field.sel(latitude=latitude).dropna("longitude")
+            np.testing.assert_allclose(
+                row[0], h_b.sel(latitude=latitude), rtol=1e-12, atol=1e-12
+            )
+            np.testing.assert_allclose(
+                row[-1],
+                result.h_e.sel(region=region).isel(omega=1),
+                rtol=1e-12,
+                atol=1e-12,
+            )
+
+
+def test_height_field_uses_grid_points_between_off_grid_boundaries():
+    shifted = geometry().copy()
+    shifted["x_wA"] = shifted.x_wA + 5.0
+    shifted["x_eA"] = shifted.x_eA + 5.0
+
+    result = GlobalRossbyModel(shifted, 0.02)._solve_frequency(forcing())
+    field = result.h.sel(region="north_atlantic").isel(omega=1)
+
+    for latitude in field.dropna("latitude", how="all").latitude.values:
+        row = field.sel(latitude=latitude).dropna("longitude")
+        assert row.longitude[0] == -60.0
+        assert row.longitude[-1] == 10.0
+        speed = global_rossby._rossby_speed(
+            np.asarray([latitude]), 0.02, 1000.0
+        )[0]
+        expected = result.h_e.sel(region="north_atlantic").isel(
+            omega=1
+        ) * np.exp(
+            1j
+            * forcing().omega[1].item()
+            * global_rossby.EARTH_RADIUS_M
+            * np.cos(np.deg2rad(latitude))
+            * np.deg2rad(row.longitude - 15.0)
+            / speed
+        )
+        np.testing.assert_allclose(row, expected)
+
 
 def test_boundary_solution_satisfies_three_basin_system():
     omega = np.array([1.0e-6])
@@ -211,16 +275,67 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         sample_spacing_seconds=spacing,
     )
 
-    assert set(result) == {"h_e", "h_b", "h_w", "T", "T_g", "T_Ek"}
+    assert set(result) == {"h_e", "h_b", "h_w", "h", "T", "T_g", "T_Ek"}
     np.testing.assert_array_equal(result.time, input_forcing.time)
     assert result.h_e.dims == ("time", "region")
     assert result.T.dims == ("time", "region", "latitude")
+    assert result.h.dims == (
+        "time",
+        "region",
+        "latitude",
+        "longitude",
+    )
+    subset = result.h.isel(
+        time=0,
+        region=0,
+        latitude=slice(0, 2),
+        longitude=slice(0, 2),
+    )
+    assert np.prod(subset.data.numblocks) < np.prod(result.h.data.numblocks)
     assert float(
         result.T.sel(region="north_atlantic").dropna("latitude").latitude[-1]
     ) == 60.0
     np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
     for name in result.data_vars:
         assert np.all(np.isfinite(result[name].fillna(0)))
+
+
+def test_solve_builds_all_outputs_lazily() -> None:
+    """Constructing the model result must not execute graph tasks."""
+    executed = []
+    with Callback(pretask=lambda key, graph, state: executed.append(key)):
+        result = GlobalRossbyModel(geometry(), 0.02).solve(
+            temporal_forcing(),
+            pad_length=0,
+            sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
+        )
+
+    assert executed == []
+    assert all(
+        isinstance(array.data, Array)
+        for array in result.data_vars.values()
+    )
+    assert result.h.dims == (
+        "time",
+        "region",
+        "latitude",
+        "longitude",
+    )
+
+
+def test_height_field_retains_float32_spatial_precision() -> None:
+    """The native float32 forcing does not create a float64 full field."""
+    input_forcing = temporal_forcing()
+    input_forcing["M_Ek_x"] = input_forcing.M_Ek_x.astype(np.float32)
+    input_forcing["M_Ek_y"] = input_forcing.M_Ek_y.astype(np.float32)
+
+    result = GlobalRossbyModel(geometry(), 0.02).solve(
+        input_forcing,
+        pad_length=0,
+        sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
+    )
+
+    assert result.h.dtype == np.float32
 
 
 def test_solve_transforms_derived_ekman_fields_not_both_winds(
@@ -296,7 +411,7 @@ def test_temporal_preprocessing_matches_internal_frequency_kernel() -> None:
         restored[name] = inverse_transform(array.fillna(0.0)).where(~masked)
 
     restored = xr.Dataset(restored)
-    for name in ("h_e", "h_b", "h_w"):
+    for name in ("h_e", "h_b", "h_w", "h"):
         xr.testing.assert_allclose(
             temporal[name], restored[name], rtol=0.0, atol=1e-10
         )
