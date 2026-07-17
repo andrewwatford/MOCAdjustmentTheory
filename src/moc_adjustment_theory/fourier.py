@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 
+import dask.array as da
 import numpy as np
 import xarray as xr
 from scipy import fft
@@ -50,21 +51,56 @@ def forward_transform(
     time_ns, dt_seconds = _validated_time(
         data, time_dim, sample_spacing_seconds
     )
-    values = np.asarray(data.data)
-    _validate_real_finite(values, "data")
+    values = data.data
     axis = data.get_axis_num(time_dim)
-    if require_zero_mean:
-        _validate_zero_mean(values, axis, zero_mean_rtol)
+    if isinstance(values, da.Array):
+        _validate_real_dtype(values, "data")
+        values = values.rechunk({axis: -1})
+        values = values.map_blocks(
+            _validated_real_finite_block,
+            dtype=values.dtype,
+        )
+        if require_zero_mean:
+            field_scale = da.max(da.absolute(values))
+            indices = tuple(range(values.ndim))
+            values = da.blockwise(
+                _validated_zero_mean_block,
+                indices,
+                values,
+                indices,
+                field_scale,
+                (),
+                axis=axis,
+                zero_mean_rtol=zero_mean_rtol,
+                dtype=values.dtype,
+            )
+    else:
+        values = np.asarray(values)
+        _validate_real_finite(values, "data")
+        if require_zero_mean:
+            _validate_zero_mean(values, axis, zero_mean_rtol)
 
     original_length = data.sizes[time_dim]
     padded_length = _padded_length(original_length, pad_length)
-    transformed = fft.rfft(values, n=padded_length, axis=axis, workers=-1)
+    if isinstance(values, da.Array):
+        transformed = da.fft.rfft(values, n=padded_length, axis=axis)
+    else:
+        transformed = fft.rfft(
+            values, n=padded_length, axis=axis, workers=-1
+        )
     if require_zero_mean:
         # The anomaly contract is exact in spectral space even when float32
         # storage leaves a small residual after demeaning.
         index = [slice(None)] * transformed.ndim
         index[axis] = 0
-        transformed[tuple(index)] = 0.0
+        if isinstance(transformed, da.Array):
+            transformed = transformed.map_blocks(
+                _zero_dc_block,
+                axis=axis,
+                dtype=transformed.dtype,
+            )
+        else:
+            transformed[tuple(index)] = 0.0
     omega = 2.0 * np.pi * fft.rfftfreq(padded_length, d=dt_seconds)
     dims = tuple(_OMEGA_DIM if dim == time_dim else dim for dim in data.dims)
     coords = {
@@ -149,17 +185,36 @@ def inverse_transform(
     ):
         raise ValueError("omega coordinate does not match forward-transform metadata")
 
-    values = np.asarray(spectrum.data)
-    _validate_numeric_finite(values, "spectrum")
+    values = spectrum.data
     axis = spectrum.get_axis_num(_OMEGA_DIM)
-    scale = np.max(np.abs(values), axis=axis)
-    dc_imaginary = np.abs(np.take(values, 0, axis=axis).imag)
-    inconsistent = dc_imaginary > imaginary_rtol * scale
-    if np.any(inconsistent):
-        raise ValueError("spectrum is inconsistent with a real time series")
-
-    restored = fft.irfft(values, n=padded_length, axis=axis, workers=-1)
-    restored = np.take(restored, np.arange(original_length), axis=axis)
+    if isinstance(values, da.Array):
+        _validate_numeric_dtype(values, "spectrum")
+        values = values.rechunk({axis: -1}).map_blocks(
+            _validated_spectrum_block,
+            axis=axis,
+            imaginary_rtol=imaginary_rtol,
+            dtype=values.dtype,
+        )
+        restored = da.fft.irfft(values, n=padded_length, axis=axis)
+        index = [slice(None)] * restored.ndim
+        index[axis] = slice(0, original_length)
+        restored = restored[tuple(index)]
+    else:
+        values = np.asarray(values)
+        _validate_numeric_finite(values, "spectrum")
+        scale = np.max(np.abs(values), axis=axis)
+        dc_imaginary = np.abs(np.take(values, 0, axis=axis).imag)
+        inconsistent = dc_imaginary > imaginary_rtol * scale
+        if np.any(inconsistent):
+            raise ValueError(
+                "spectrum is inconsistent with a real time series"
+            )
+        restored = fft.irfft(
+            values, n=padded_length, axis=axis, workers=-1
+        )
+        restored = np.take(
+            restored, np.arange(original_length), axis=axis
+        )
     dims = tuple(time_dim if dim == _OMEGA_DIM else dim for dim in spectrum.dims)
     coords = {
         name: coord
@@ -374,11 +429,71 @@ def _validate_numeric_finite(values: np.ndarray, name: str) -> None:
         raise ValueError(f"{name} must not contain NaN or infinite values")
 
 
+def _validate_numeric_dtype(values, name: str) -> None:
+    """Require a numeric dtype without evaluating a lazy array."""
+    if not np.issubdtype(values.dtype, np.number):
+        raise TypeError(f"{name} must contain numeric values")
+
+
+def _validate_real_dtype(values, name: str) -> None:
+    """Require a real numeric dtype without evaluating a lazy array."""
+    _validate_numeric_dtype(values, name)
+    if np.issubdtype(values.dtype, np.complexfloating):
+        raise TypeError(f"{name} must contain real values")
+
+
 def _validate_real_finite(values: np.ndarray, name: str) -> None:
     """Require finite real-valued input for a real Fourier transform."""
     _validate_numeric_finite(values, name)
     if np.iscomplexobj(values):
         raise TypeError(f"{name} must contain real values")
+
+
+def _validated_real_finite_block(values: np.ndarray) -> np.ndarray:
+    """Validate one lazy input block when it is evaluated."""
+    _validate_real_finite(values, "data")
+    return values
+
+
+def _validated_zero_mean_block(
+    values: np.ndarray,
+    field_scale: np.ndarray,
+    *,
+    axis: int,
+    zero_mean_rtol: float,
+) -> np.ndarray:
+    """Validate complete time series against the lazy global field scale."""
+    means = np.abs(np.mean(values, axis=axis))
+    if np.any(means > zero_mean_rtol * float(field_scale)):
+        raise ValueError(
+            "each time series must be zero mean; pass "
+            "require_zero_mean=False to retain a nonzero mean"
+        )
+    return values
+
+
+def _zero_dc_block(values: np.ndarray, *, axis: int) -> np.ndarray:
+    """Project the zero-frequency coefficient of one block to zero."""
+    values = values.copy()
+    index = [slice(None)] * values.ndim
+    index[axis] = 0
+    values[tuple(index)] = 0.0
+    return values
+
+
+def _validated_spectrum_block(
+    values: np.ndarray,
+    *,
+    axis: int,
+    imaginary_rtol: float,
+) -> np.ndarray:
+    """Validate one block containing complete frequency series."""
+    _validate_numeric_finite(values, "spectrum")
+    scale = np.max(np.abs(values), axis=axis)
+    dc_imaginary = np.abs(np.take(values, 0, axis=axis).imag)
+    if np.any(dc_imaginary > imaginary_rtol * scale):
+        raise ValueError("spectrum is inconsistent with a real time series")
+    return values
 
 
 def _validate_zero_mean(
