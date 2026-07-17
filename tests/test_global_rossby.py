@@ -295,7 +295,15 @@ def test_temporal_preprocessing_matches_internal_frequency_kernel() -> None:
         masked = array.isnull().all("omega")
         restored[name] = inverse_transform(array.fillna(0.0)).where(~masked)
 
-    xr.testing.assert_allclose(temporal, xr.Dataset(restored))
+    restored = xr.Dataset(restored)
+    for name in ("h_e", "h_b", "h_w"):
+        xr.testing.assert_allclose(
+            temporal[name], restored[name], rtol=0.0, atol=1e-10
+        )
+    for name in ("T", "T_g", "T_Ek"):
+        xr.testing.assert_allclose(
+            temporal[name], restored[name], rtol=0.0, atol=1e-7
+        )
 
 
 def test_frequency_kernel_is_not_public() -> None:
