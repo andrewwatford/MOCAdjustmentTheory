@@ -1,3 +1,5 @@
+"""Tests for the global Rossby-wave adjustment model."""
+
 import numpy as np
 import pytest
 import xarray as xr
@@ -214,6 +216,29 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         assert np.all(np.isfinite(result[name].fillna(0)))
 
 
+def test_default_padding_covers_longest_crossing_time() -> None:
+    """Automatic padding matches an explicit crossing-time sample count."""
+    input_forcing = temporal_forcing()
+    spacing = 365.25 / 12 * 24 * 60 * 60
+    model = GlobalRossbyModel(geometry(), 0.02)
+    expected_pad_length = int(
+        np.ceil(model.longest_crossing_time_seconds / spacing)
+    )
+
+    automatic = model.solve(
+        input_forcing,
+        sample_spacing_seconds=spacing,
+    )
+    explicit = model.solve(
+        input_forcing,
+        pad_length=expected_pad_length,
+        sample_spacing_seconds=spacing,
+    )
+
+    assert model.longest_crossing_time_seconds > 0.0
+    xr.testing.assert_allclose(automatic, explicit)
+
+
 def test_solve_infers_daily_spacing() -> None:
     """A uniform daily grid needs no explicit physical interval."""
     input_forcing = temporal_forcing().assign_coords(
@@ -223,8 +248,8 @@ def test_solve_infers_daily_spacing() -> None:
 
     result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
-        omega_dim="angular_frequency",
+        pad_length=0,
     )
 
     np.testing.assert_array_equal(result.time, input_forcing.time)
-    assert "angular_frequency" not in result.dims
+    assert "omega" not in result.dims

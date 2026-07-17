@@ -17,7 +17,8 @@ The user workflow is:
 Users provide the forcing and isobath datasets, and the model returns another
 dataset. The Fourier interface is the stateless `forward_transform` and
 `inverse_transform` function pair. `GlobalRossbyModel.solve()` applies that
-pair consistently around the frequency-space model.
+pair consistently around the frequency-space model. `butterworth_filter`
+provides a zero-phase low-pass filter for time-dependent `xarray` data.
 
 ## Theory
 
@@ -164,6 +165,31 @@ model = GlobalRossbyModel(
 )
 solution_ds = model.solve(forcing_ds)
 ```
+
+By default, `solve(pad_length=None)` computes the longest zonal Rossby-wave
+crossing time from the supplied geometry, active-layer depth, and reduced
+gravity. It converts that duration to forcing time steps and appends at least
+that many zero samples. The complete FFT length is made odd to avoid a
+self-conjugate Nyquist coefficient when the model applies complex propagation
+phases. An integer `pad_length` overrides the physical default and specifies
+the minimum number of zero samples to append.
+
+The standalone `forward_transform` uses the same right-padding and odd
+total-length convention. Its `pad_length` defaults to zero because a stateless
+transform has no model geometry from which to infer a crossing time;
+`inverse_transform` reads the complete transform contract from the spectrum's
+metadata.
+
+For low-pass filtering, `butterworth_filter(data, cutoff_omega, order=4)`
+accepts either a `DataArray` or `Dataset`. It designs the Butterworth filter as
+second-order sections and applies it forward and backward, producing zero phase
+and twice the stated order. Consequently, `cutoff_omega` is the single-pass
+$-3$ dB angular frequency in rad s$^{-1}$ and the final amplitude there is
+$1/2$. Numeric variables containing the selected time dimension are filtered,
+while other dataset variables and complete-series spatial masks are preserved.
+Odd reflection is used at both endpoints with SciPy's standard padding length.
+Padding reduces but cannot eliminate endpoint transients, so conclusions that
+depend on the record ends should be treated cautiously.
 
 ### Active-layer dataset
 
