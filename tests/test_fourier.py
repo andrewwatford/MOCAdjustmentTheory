@@ -140,11 +140,11 @@ def test_inverse_rejects_imaginary_dc_component() -> None:
         inverse_transform(spectrum)
 
 
-def test_butterworth_filter_has_expected_half_power_response() -> None:
-    count = 101
+def test_butterworth_filter_has_expected_forward_backward_response() -> None:
+    count = 2001
     time = np.datetime64("2000-01-01") + np.arange(count) * np.timedelta64(1, "s")
-    cutoff_bin = 10
-    signal = np.cos(2.0 * np.pi * cutoff_bin * np.arange(count) / count)
+    cutoff_hz = 0.05
+    signal = np.sin(2.0 * np.pi * cutoff_hz * np.arange(count))
     data = xr.DataArray(
         signal,
         dims="time",
@@ -152,20 +152,24 @@ def test_butterworth_filter_has_expected_half_power_response() -> None:
         attrs={"units": "m"},
         name="signal",
     )
-    cutoff_omega = 2.0 * np.pi * cutoff_bin / count
+    cutoff_omega = 2.0 * np.pi * cutoff_hz
 
     filtered = butterworth_filter(data, cutoff_omega, order=4)
 
-    np.testing.assert_allclose(filtered, signal / np.sqrt(2.0), atol=1e-12)
+    np.testing.assert_allclose(
+        filtered[200:-200], signal[200:-200] / 2.0, atol=1e-10
+    )
     assert filtered.name == data.name
     assert filtered.attrs == data.attrs
 
 
 def test_butterworth_filter_handles_datasets_and_complete_masks() -> None:
-    time = np.datetime64("2000-01-01") + np.arange(5) * np.timedelta64(1, "D")
+    count = 65
+    time = np.datetime64("2000-01-01") + np.arange(count) * np.timedelta64(1, "D")
+    signal = np.sin(2.0 * np.pi * np.arange(count) / 10.0)
     dataset = xr.Dataset(
         {
-            "series": (("point", "time"), [[1.0, 0.0, -1.0, 0.0, 1.0], [np.nan] * 5]),
+            "series": (("point", "time"), [signal, [np.nan] * count]),
             "label": ("point", ["active", "masked"]),
         },
         coords={"point": [0, 1], "time": time},

@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 import numpy as np
 import xarray as xr
+from scipy.signal import butter, sosfiltfilt
 
 _METADATA_KEY = "_moc_adjustment_fourier"
 _OMEGA_DIM = "omega"
@@ -203,20 +204,23 @@ def butterworth_filter(
     order: int = 4,
     time_dim: str = "time",
     sample_spacing_seconds: float | None = None,
+    pad_length: int | None = None,
 ) -> xr.DataArray | xr.Dataset:
     """Apply a zero-phase low-pass Butterworth filter along time.
 
-    ``cutoff_omega`` is the half-power angular frequency in rad/s and ``order``
-    controls the roll-off. The filter multiplies the discrete Fourier
-    coefficients by
-
-    ``1 / sqrt(1 + (abs(omega) / cutoff_omega) ** (2 * order))``.
+    ``cutoff_omega`` is the single-pass critical angular frequency in rad/s and
+    ``order`` is the single-pass filter order. The filter is designed as
+    second-order sections and applied forward and backward, so the returned
+    signal has zero phase, twice the stated order, and half the passband
+    amplitude at ``cutoff_omega``.
 
     For a `Dataset`, every numeric data variable containing ``time_dim`` is
     filtered; other variables are preserved. Spatial locations that are NaN for
     the complete time series remain masked, while partial gaps are rejected.
-    The operation assumes the endpoints are periodic and preserves coordinates,
-    names, and attributes.
+    Odd reflection is used at both endpoints. With ``pad_length=None``, SciPy's
+    standard `sosfiltfilt` padding length is used; an integer overrides the
+    number of samples reflected at each end. Coordinates, names, and attributes
+    are preserved.
 
     ``sample_spacing_seconds`` has the same calendar-label semantics as
     `forward_transform`. In particular, monthly samples may be represented by
@@ -238,16 +242,34 @@ def butterworth_filter(
     if not isinstance(time_dim, str) or not time_dim:
         raise TypeError("time_dim must be a nonempty string")
     _validate_sample_spacing(sample_spacing_seconds)
+    if pad_length is not None:
+        if isinstance(pad_length, bool) or not isinstance(pad_length, int):
+            raise TypeError("pad_length must be an integer or None")
+        if pad_length < 0:
+            raise ValueError("pad_length must be nonnegative")
     if time_dim not in data.dims:
         raise ValueError(f"data must have a {time_dim!r} dimension")
+
+    time = data if isinstance(data, xr.DataArray) else data[time_dim]
+    _, dt_seconds = _validated_time(time, time_dim, sample_spacing_seconds)
+    cutoff_hz = float(cutoff_omega) / (2.0 * np.pi)
+    sampling_hz = 1.0 / dt_seconds
+    if cutoff_hz >= 0.5 * sampling_hz:
+        raise ValueError("cutoff_omega must be below the Nyquist frequency")
+    sections = butter(
+        order,
+        cutoff_hz,
+        btype="lowpass",
+        fs=sampling_hz,
+        output="sos",
+    )
 
     if isinstance(data, xr.DataArray):
         return _butterworth_dataarray(
             data,
-            float(cutoff_omega),
-            order,
+            sections,
             time_dim,
-            sample_spacing_seconds,
+            pad_length,
         )
 
     variables = {}
@@ -255,10 +277,9 @@ def butterworth_filter(
         if time_dim in variable.dims and np.issubdtype(variable.dtype, np.number):
             variables[name] = _butterworth_dataarray(
                 variable,
-                float(cutoff_omega),
-                order,
+                sections,
                 time_dim,
-                sample_spacing_seconds,
+                pad_length,
             )
         else:
             variables[name] = variable
@@ -267,15 +288,13 @@ def butterworth_filter(
 
 def _butterworth_dataarray(
     data: xr.DataArray,
-    cutoff_omega: float,
-    order: int,
+    sections: np.ndarray,
     time_dim: str,
-    sample_spacing_seconds: float | None,
+    pad_length: int | None,
 ) -> xr.DataArray:
     """Filter one numeric array while retaining complete-series masks."""
     if not np.issubdtype(data.dtype, np.number):
         raise TypeError("data must contain numeric values")
-    _, dt_seconds = _validated_time(data, time_dim, sample_spacing_seconds)
     values = np.asarray(data.data)
     axis = data.get_axis_num(time_dim)
     if np.any(np.isinf(values)):
@@ -288,18 +307,15 @@ def _butterworth_dataarray(
 
     expanded_mask = np.expand_dims(fully_missing, axis=axis)
     working = np.where(expanded_mask, 0.0, values)
-    omega = 2.0 * np.pi * np.fft.fftfreq(
-        data.sizes[time_dim], d=dt_seconds
+    if pad_length is not None and pad_length >= data.sizes[time_dim] - 1:
+        raise ValueError("pad_length must be smaller than the time series")
+    filtered = sosfiltfilt(
+        sections,
+        working,
+        axis=axis,
+        padtype="odd",
+        padlen=pad_length,
     )
-    with np.errstate(over="ignore"):
-        gain = 1.0 / np.hypot(1.0, (np.abs(omega) / cutoff_omega) ** order)
-    shape = [1] * working.ndim
-    shape[axis] = gain.size
-    filtered = np.fft.ifft(
-        np.fft.fft(working, axis=axis) * gain.reshape(shape), axis=axis
-    )
-    if not np.iscomplexobj(values):
-        filtered = filtered.real
     filtered = np.where(expanded_mask, np.nan, filtered)
     return data.copy(data=filtered)
 

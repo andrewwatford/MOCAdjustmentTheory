@@ -181,11 +181,16 @@ transform has no model geometry from which to infer a crossing time;
 metadata.
 
 For low-pass filtering, `butterworth_filter(data, cutoff_omega, order=4)`
-accepts either a `DataArray` or `Dataset`. The cutoff is the half-power angular
-frequency in rad s$^{-1}$. Numeric variables containing the selected time
-dimension are filtered, while other dataset variables and complete-series
-spatial masks are preserved. The zero-phase frequency response assumes that
-the endpoints of each series are periodic.
+accepts either a `DataArray` or `Dataset`. It designs the Butterworth filter as
+second-order sections and applies it forward and backward, producing zero phase
+and twice the stated order. Consequently, `cutoff_omega` is the single-pass
+$-3$ dB angular frequency in rad s$^{-1}$ and the final amplitude there is
+$1/2$. Numeric variables containing the selected time dimension are filtered,
+while other dataset variables and complete-series spatial masks are preserved.
+Odd reflection is used at both endpoints with SciPy's standard padding length;
+`pad_length` may override the number of reflected samples at each end. Padding
+reduces but cannot eliminate endpoint transients, so conclusions that depend on
+the record ends should be checked for sensitivity to this choice.
 
 ### Active-layer dataset
 
