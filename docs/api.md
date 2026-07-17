@@ -16,3 +16,9 @@
 ::: moc_adjustment_theory.inverse_transform
     options:
       show_root_heading: true
+
+## Filtering
+
+::: moc_adjustment_theory.butterworth_filter
+    options:
+      show_root_heading: true
