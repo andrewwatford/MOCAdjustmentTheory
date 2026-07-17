@@ -174,14 +174,7 @@ self-conjugate Nyquist coefficient when the model applies complex propagation
 phases. An integer `pad_length` overrides the physical default and specifies
 the minimum number of zero samples to append.
 
-Angular frequency is always represented internally by `omega` in rad s$^{-1}$,
-and the paired transforms use one fixed normalization. Neither convention is a
-`solve()` option because changing either consistently would not change the
-time-domain solution. The zero-mean requirement remains configurable because
-it is a scientific constraint on the forcing rather than a representation
-choice.
-
-The standalone `forward_transform` uses the same causal right-padding and odd
+The standalone `forward_transform` uses the same right-padding and odd
 total-length convention. Its `pad_length` defaults to zero because a stateless
 transform has no model geometry from which to infer a crossing time;
 `inverse_transform` reads the complete transform contract from the spectrum's
