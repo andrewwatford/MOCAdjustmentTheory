@@ -154,6 +154,17 @@ T_g^{(j)}=\frac{g'H}{f}\left(h_e^{(j)}-h_w^{(j)}\right),
 h_w^{(j)}=h_e^{(j)}-\frac{fT_g^{(j)}}{g'H}.
 $$
 
+We can also obtain the height field for any point in the domain:
+
+$$
+\widehat h^{(j)}(x,y,\omega)
+=\widehat h_e^{(j)}(\omega)
+\exp\!\left[\frac{i\omega[x-x_e^{(j)}(y)]}{c(y)}\right]
+-\int_{x_b^{(j)}(y)}^{x_e^{(j)}(y)}
+\frac{\widehat w_{\mathrm{Ek}}(x',y,\omega)}{c(y)}
+\exp\!\left[\frac{i\omega(x-x')}{c(y)}\right]dx'.
+$$
+
 ## Model interface
 
 The intended interface is:
@@ -234,7 +245,7 @@ $w_{\mathrm{Ek}}=\nabla\mathbin{\cdot}\mathbf{M}_{\mathrm{Ek}}$.
 
 The output dataset contains:
 
-1. $h_e^{(j)}(t)$, $h_b^{(j)}(y,t)$, and $h_w^{(j)}(y,t)$ for each of the five
+1. $h_e^{(j)}(t)$, $h_b^{(j)}(y,t), h_w^{(j)}(y,t),$ and $h^{(j)}(x,y,t)$ for each of the five
    regions. The $h_e$ values repeat where regions share an ocean basin.
 2. $T^{(j)}(y,t)$, $T_g^{(j)}(y,t)$, and $T_{\mathrm{Ek}}^{(j)}(y,t)$ for each
    of the five regions.
