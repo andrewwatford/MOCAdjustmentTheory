@@ -47,7 +47,7 @@ $$
 \widehat h_b^{(j)}(y,\omega)
 =\widehat h_e^{(j)}(\omega)
 \exp\!\left[\frac{i\omega[x_b^{(j)}(y)-x_e^{(j)}(y)]}{c(y)}\right]
--\int_{x_b^{(j)}}^{x_e^{(j)}(y)}
+-\int_{x_b^{(j)}(y)}^{x_e^{(j)}(y)}
 \frac{\widehat w_{\mathrm{Ek}}(x',y,\omega)}{c(y)}
 \exp\!\left[\frac{i\omega(x_b^{(j)}-x')}{c(y)}\right]dx',
 $$
@@ -160,7 +160,7 @@ $$
 \widehat h^{(j)}(x,y,\omega)
 =\widehat h_e^{(j)}(\omega)
 \exp\!\left[\frac{i\omega[x-x_e^{(j)}(y)]}{c(y)}\right]
--\int_{x(y)}^{x_e^{(j)}(y)}
+-\int_{x}^{x_e^{(j)}(y)}
 \frac{\widehat w_{\mathrm{Ek}}(x',y,\omega)}{c(y)}
 \exp\!\left[\frac{i\omega(x-x')}{c(y)}\right]dx'.
 $$
