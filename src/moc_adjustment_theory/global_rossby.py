@@ -28,6 +28,7 @@ _INPUT_LATITUDE_CHUNK = 64
 _INPUT_LONGITUDE_CHUNK = 128
 _HEIGHT_LATITUDE_CHUNK = 8
 _OUTPUT_TIME_CHUNK = 12
+_MODEL_MONTH_SECONDS = 365.25 / 12.0 * 24.0 * 60.0 * 60.0
 
 _REGIONS = (
     ("north_atlantic", "x_wA", "x_eA"),
@@ -97,22 +98,24 @@ class GlobalRossbyModel:
         require_zero_mean: bool = True,
         zero_mean_rtol: float = 1e-7,
         imaginary_rtol: float = 1e-12,
-        sample_spacing_seconds: float | None = None,
     ) -> xr.Dataset:
         """Solve temporal forcing and return temporal model diagnostics.
 
         The three forcing variables ``M_Ek_x``, ``M_Ek_y`` and ``T_N`` are
-        combined into Ekman diagnostics, transformed with one explicit
-        contract, and inverse transformed onto their original time coordinate.
+        assumed to be calendar-month means. Their shared time coordinate must
+        be a contiguous sequence of month starts, which is the only supported
+        temporal convention. The output uses the same convention.
+
+        Monthly averaging commutes with this linear, time-invariant model. The
+        solver therefore transforms the monthly-mean sequence directly and
+        applies the physical model response at each Fourier frequency; it does
+        not deconvolve or reapply a boxcar averaging transfer function.
         All forcing-dependent calculations are represented as a Dask graph;
         this method returns without loading the full forcing or computing any
         output values. Callers may compute a subset, persist selected results,
         or stream the dataset to a chunked store.
-        ``sample_spacing_seconds`` supplies a physical sample
-        interval when increasing calendar labels are not uniformly separated;
-        monthly forcing in this project uses ``365.25 / 12`` days. All other
-        transform arguments are forwarded unchanged to the paired Fourier
-        functions. With ``pad_length=None``, the model appends enough zero
+        The FFT uses a nominal uniform month of ``365.25 / 12`` days. With
+        ``pad_length=None``, the model appends enough zero
         samples to cover its longest Rossby-wave crossing time and makes the
         complete FFT length odd. An explicit ``pad_length`` is the minimum
         number of zero samples appended and overrides that physical default.
@@ -139,10 +142,6 @@ class GlobalRossbyModel:
             tolerance used before projecting accepted DC residuals to zero.
         imaginary_rtol
             Relative tolerance for spectral components that must be real.
-        sample_spacing_seconds
-            Optional physical interval for nonuniform calendar labels. With
-            ``None``, a uniform interval is inferred from the time coordinate.
-
         Returns
         -------
         xarray.Dataset
@@ -160,6 +159,7 @@ class GlobalRossbyModel:
                 f"forcing dataset is missing: {', '.join(sorted(missing))}"
             )
         self._northern_boundary_latitude(forcing_ds["T_N"])
+        self._validate_monthly_forcing(forcing_ds, time_dim)
 
         forcing_lazy = forcing_ds[list(required)].chunk(
             {
@@ -171,7 +171,7 @@ class GlobalRossbyModel:
 
         if pad_length is None:
             _, dt_seconds = _validated_time(
-                forcing_ds["T_N"], time_dim, sample_spacing_seconds
+                forcing_ds["T_N"], time_dim, _MODEL_MONTH_SECONDS
             )
             pad_length = int(
                 np.ceil(self.longest_crossing_time_seconds / dt_seconds)
@@ -180,7 +180,7 @@ class GlobalRossbyModel:
         transform_options = {
             "time_dim": time_dim,
             "pad_length": pad_length,
-            "sample_spacing_seconds": sample_spacing_seconds,
+            "sample_spacing_seconds": _MODEL_MONTH_SECONDS,
         }
         t_n_hat = forward_transform(
             forcing_lazy["T_N"],
@@ -294,6 +294,28 @@ class GlobalRossbyModel:
             }
         )
         return result
+
+    @staticmethod
+    def _validate_monthly_forcing(
+        forcing_ds: xr.Dataset, time_dim: str
+    ) -> None:
+        """Require a contiguous month-start forcing coordinate."""
+        if time_dim not in forcing_ds.coords:
+            raise ValueError(f"forcing dataset is missing: {time_dim}")
+        time = np.asarray(forcing_ds[time_dim].values)
+        if not np.issubdtype(time.dtype, np.datetime64):
+            raise TypeError("forcing time coordinate must contain datetime64 values")
+        if np.any(np.isnat(time)):
+            raise ValueError("forcing time coordinate must not contain NaT")
+        month_start = time.astype("datetime64[M]").astype("datetime64[ns]")
+        time_ns = time.astype("datetime64[ns]")
+        if not np.array_equal(time_ns, month_start):
+            raise ValueError(
+                "forcing time coordinates must be the first day of each month"
+            )
+        month_number = time.astype("datetime64[M]").astype(np.int64)
+        if np.any(np.diff(month_number) != 1):
+            raise ValueError("forcing months must be contiguous")
 
     def _solve_frequency(self, forcing_hat: xr.Dataset) -> xr.Dataset:
         """Run the internal frequency-space compatibility path."""
