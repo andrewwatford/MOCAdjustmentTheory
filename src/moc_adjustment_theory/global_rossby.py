@@ -332,7 +332,7 @@ class GlobalRossbyModel:
         f = 2.0 * EARTH_ROTATION_S * np.sin(lat_rad)
         depth = float(self.isobath_ds.attrs["isobath_depth_m"])
         gh = self.g_prime * depth
-        c = _rossby_speed(latitude, self.g_prime, depth)
+        c = rossby_speed(latitude, self.g_prime, depth)
         latitude_size = latitude.size
 
         # The two zonal source terms share the same forcing rows and phases.
@@ -611,7 +611,7 @@ class GlobalRossbyModel:
         f = 2.0 * EARTH_ROTATION_S * np.sin(lat_rad)
         depth = float(self.isobath_ds.attrs["isobath_depth_m"])
         gh = self.g_prime * depth
-        c = _rossby_speed(latitude, self.g_prime, depth)
+        c = rossby_speed(latitude, self.g_prime, depth)
 
         shape = (omega.size, len(_REGIONS), latitude.size)
         f_partial = np.full(shape, np.nan + 0j)
@@ -903,7 +903,7 @@ class GlobalRossbyModel:
         depth = float(self.isobath_ds.attrs["isobath_depth_m"])
         if not np.isfinite(depth) or depth <= 0:
             raise ValueError("isobath_depth_m must be positive")
-        speed = _rossby_speed(latitude, self.g_prime, depth)
+        speed = rossby_speed(latitude, self.g_prime, depth)
         zonal_scale = EARTH_RADIUS_M * np.cos(np.deg2rad(latitude))
         boundaries = {}
         support = {}
@@ -1559,7 +1559,7 @@ def _pad_active_latitudes(
     )
 
 
-def _rossby_speed(
+def rossby_speed(
     latitude: np.ndarray, g_prime: float, depth: float
 ) -> np.ndarray:
     """Return the capped first-mode long Rossby-wave speed in m s-1."""
