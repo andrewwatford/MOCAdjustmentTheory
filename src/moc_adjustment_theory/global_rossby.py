@@ -9,13 +9,12 @@ import dask.array as da
 import numpy as np
 import xarray as xr
 from dask import delayed
+from scipy import ndimage
 
 from .fourier import (
     _METADATA_KEY,
     _validate_real_dtype,
-    _validate_real_finite,
     _validate_zero_mean,
-    _validated_real_finite_block,
     _validated_zero_mean_block,
     _validated_time,
     forward_transform,
@@ -29,6 +28,7 @@ _INPUT_LATITUDE_CHUNK = 64
 _INPUT_LONGITUDE_CHUNK = 128
 _HEIGHT_LATITUDE_CHUNK = 8
 _OUTPUT_TIME_CHUNK = 12
+_MODEL_MONTH_SECONDS = 365.25 / 12.0 * 24.0 * 60.0 * 60.0
 
 _REGIONS = (
     ("north_atlantic", "x_wA", "x_eA"),
@@ -98,22 +98,24 @@ class GlobalRossbyModel:
         require_zero_mean: bool = True,
         zero_mean_rtol: float = 1e-7,
         imaginary_rtol: float = 1e-12,
-        sample_spacing_seconds: float | None = None,
     ) -> xr.Dataset:
         """Solve temporal forcing and return temporal model diagnostics.
 
         The three forcing variables ``M_Ek_x``, ``M_Ek_y`` and ``T_N`` are
-        combined into Ekman diagnostics, transformed with one explicit
-        contract, and inverse transformed onto their original time coordinate.
+        assumed to be calendar-month means. Their shared time coordinate must
+        be a contiguous sequence of month starts, which is the only supported
+        temporal convention. The output uses the same convention.
+
+        Monthly averaging commutes with this linear, time-invariant model. The
+        solver therefore transforms the monthly-mean sequence directly and
+        applies the physical model response at each Fourier frequency; it does
+        not deconvolve or reapply a boxcar averaging transfer function.
         All forcing-dependent calculations are represented as a Dask graph;
         this method returns without loading the full forcing or computing any
         output values. Callers may compute a subset, persist selected results,
         or stream the dataset to a chunked store.
-        ``sample_spacing_seconds`` supplies a physical sample
-        interval when increasing calendar labels are not uniformly separated;
-        monthly forcing in this project uses ``365.25 / 12`` days. All other
-        transform arguments are forwarded unchanged to the paired Fourier
-        functions. With ``pad_length=None``, the model appends enough zero
+        The FFT uses a nominal uniform month of ``365.25 / 12`` days. With
+        ``pad_length=None``, the model appends enough zero
         samples to cover its longest Rossby-wave crossing time and makes the
         complete FFT length odd. An explicit ``pad_length`` is the minimum
         number of zero samples appended and overrides that physical default.
@@ -124,6 +126,9 @@ class GlobalRossbyModel:
             Temporal Ekman transports and northern transport on a shared time
             coordinate. ``T_N`` must have a numeric
             ``latitude_degrees_north`` attribute specifying its boundary.
+            Wind values must be finite over the active model ocean, but may be
+            NaN elsewhere. Missing values in the one-cell numerical stencil
+            outside that ocean are extended from the nearest ocean cell.
         time_dim
             Temporal dimension name. Angular frequency is always the internal
             ``omega`` dimension in rad s-1.
@@ -137,10 +142,6 @@ class GlobalRossbyModel:
             tolerance used before projecting accepted DC residuals to zero.
         imaginary_rtol
             Relative tolerance for spectral components that must be real.
-        sample_spacing_seconds
-            Optional physical interval for nonuniform calendar labels. With
-            ``None``, a uniform interval is inferred from the time coordinate.
-
         Returns
         -------
         xarray.Dataset
@@ -158,6 +159,7 @@ class GlobalRossbyModel:
                 f"forcing dataset is missing: {', '.join(sorted(missing))}"
             )
         self._northern_boundary_latitude(forcing_ds["T_N"])
+        self._validate_monthly_forcing(forcing_ds, time_dim)
 
         forcing_lazy = forcing_ds[list(required)].chunk(
             {
@@ -169,7 +171,7 @@ class GlobalRossbyModel:
 
         if pad_length is None:
             _, dt_seconds = _validated_time(
-                forcing_ds["T_N"], time_dim, sample_spacing_seconds
+                forcing_ds["T_N"], time_dim, _MODEL_MONTH_SECONDS
             )
             pad_length = int(
                 np.ceil(self.longest_crossing_time_seconds / dt_seconds)
@@ -178,7 +180,7 @@ class GlobalRossbyModel:
         transform_options = {
             "time_dim": time_dim,
             "pad_length": pad_length,
-            "sample_spacing_seconds": sample_spacing_seconds,
+            "sample_spacing_seconds": _MODEL_MONTH_SECONDS,
         }
         t_n_hat = forward_transform(
             forcing_lazy["T_N"],
@@ -187,17 +189,22 @@ class GlobalRossbyModel:
             **transform_options,
         )
 
-        latitude, longitude, mx, my = self._temporal_wind_arrays(
-            forcing_lazy,
-            time_dim,
-            require_zero_mean,
-            zero_mean_rtol,
-        )
+        latitude, longitude = self._forcing_coordinates(forcing_lazy)
         geometry = self._geometry(
             latitude, self._northern_boundary_latitude(t_n_hat)
         )
         quadrature = self._zonal_quadrature(
             longitude, latitude, geometry
+        )
+        ocean_mask = self._active_ocean_mask(
+            latitude.size, longitude.size, quadrature
+        )
+        latitude, longitude, mx, my = self._temporal_wind_arrays(
+            forcing_lazy,
+            time_dim,
+            require_zero_mean,
+            zero_mean_rtol,
+            ocean_mask,
         )
         # These spatial linear operations commute with the temporal FFT.
         w_ek = self._ekman_curl(mx, my, latitude, longitude)
@@ -287,6 +294,28 @@ class GlobalRossbyModel:
             }
         )
         return result
+
+    @staticmethod
+    def _validate_monthly_forcing(
+        forcing_ds: xr.Dataset, time_dim: str
+    ) -> None:
+        """Require a contiguous month-start forcing coordinate."""
+        if time_dim not in forcing_ds.coords:
+            raise ValueError(f"forcing dataset is missing: {time_dim}")
+        time = np.asarray(forcing_ds[time_dim].values)
+        if not np.issubdtype(time.dtype, np.datetime64):
+            raise TypeError("forcing time coordinate must contain datetime64 values")
+        if np.any(np.isnat(time)):
+            raise ValueError("forcing time coordinate must not contain NaT")
+        month_start = time.astype("datetime64[M]").astype("datetime64[ns]")
+        time_ns = time.astype("datetime64[ns]")
+        if not np.array_equal(time_ns, month_start):
+            raise ValueError(
+                "forcing time coordinates must be the first day of each month"
+            )
+        month_number = time.astype("datetime64[M]").astype(np.int64)
+        if np.any(np.diff(month_number) != 1):
+            raise ValueError("forcing months must be contiguous")
 
     def _solve_frequency(self, forcing_hat: xr.Dataset) -> xr.Dataset:
         """Run the internal frequency-space compatibility path."""
@@ -756,13 +785,10 @@ class GlobalRossbyModel:
         return omega, latitude, longitude, mx, my, t_n, y_n
 
     @staticmethod
-    def _temporal_wind_arrays(
+    def _forcing_coordinates(
         forcing_ds: xr.Dataset,
-        time_dim: str,
-        require_zero_mean: bool,
-        zero_mean_rtol: float,
-    ):
-        """Validate temporal wind forcing and return ordered arrays."""
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return validated, increasing spatial forcing coordinates."""
         missing_coords = {"latitude", "longitude"}.difference(
             forcing_ds.coords
         )
@@ -779,6 +805,22 @@ class GlobalRossbyModel:
             raise ValueError("spatial coordinates require at least three points")
         if np.any(np.diff(latitude) <= 0) or np.any(np.diff(longitude) <= 0):
             raise ValueError("latitude and longitude must increase")
+        return latitude, longitude
+
+    @staticmethod
+    def _temporal_wind_arrays(
+        forcing_ds: xr.Dataset,
+        time_dim: str,
+        require_zero_mean: bool,
+        zero_mean_rtol: float,
+        ocean_mask: np.ndarray,
+    ):
+        """Validate, geometrically extend, and return temporal wind arrays."""
+        latitude, longitude = GlobalRossbyModel._forcing_coordinates(
+            forcing_ds
+        )
+        if ocean_mask.shape != (latitude.size, longitude.size):
+            raise ValueError("ocean mask does not match the forcing grid")
 
         expected_dims = {time_dim, "latitude", "longitude"}
         arrays = []
@@ -793,10 +835,23 @@ class GlobalRossbyModel:
             ).data
             if isinstance(raw_values, da.Array):
                 _validate_real_dtype(raw_values, name)
-                values = raw_values.map_blocks(
-                    _validated_real_finite_block,
+                mask = da.from_array(
+                    ocean_mask,
+                    chunks=raw_values.chunks[1:],
+                )[None, :, :]
+                values = da.map_blocks(
+                    _validated_masked_wind_block,
+                    raw_values,
+                    mask,
                     dtype=raw_values.dtype,
+                    chunks=raw_values.chunks,
+                    variable_name=name,
                 )
+                values = _extend_exterior_wind(values, ocean_mask)
+                # ``da.roll`` introduces small boundary chunks. Restore the
+                # input layout so second-order spatial gradients always retain
+                # the minimum three cells required by Dask.
+                values = values.rechunk(raw_values.chunks)
                 if require_zero_mean:
                     field_scale = da.max(da.absolute(values))
                     indices = tuple(range(values.ndim))
@@ -813,7 +868,8 @@ class GlobalRossbyModel:
                     )
             else:
                 values = np.asarray(raw_values)
-                _validate_real_finite(values, name)
+                _validate_masked_wind(values, ocean_mask, name)
+                values = _extend_exterior_wind(values, ocean_mask)
                 if require_zero_mean:
                     _validate_zero_mean(values, 0, zero_mean_rtol)
             arrays.append(values)
@@ -1076,6 +1132,21 @@ class GlobalRossbyModel:
                 )
             output.append(rules)
         return output
+
+    @staticmethod
+    def _active_ocean_mask(
+        latitude_size: int,
+        longitude_size: int,
+        quadrature,
+    ) -> np.ndarray:
+        """Return the union of grid cells inside all regional quadratures."""
+        mask = np.zeros((latitude_size, longitude_size), dtype=bool)
+        for rules in quadrature:
+            for rule in rules:
+                mask[rule.latitude_index, rule.interior] = True
+        if not np.any(mask):
+            raise ValueError("model geometry contains no forcing-grid cells")
+        return mask
 
     @staticmethod
     def _height_field(
@@ -1350,6 +1421,87 @@ class GlobalRossbyModel:
             )
             h[n] = np.linalg.solve(matrix, rhs[n])
         return h
+
+
+def _validate_masked_wind(
+    values: np.ndarray,
+    ocean_mask: np.ndarray,
+    variable_name: str,
+) -> None:
+    """Allow NaNs outside the model ocean while requiring finite ocean data."""
+    _validate_real_dtype(values, variable_name)
+    if values.shape[-2:] != ocean_mask.shape:
+        raise ValueError("ocean mask does not match a wind forcing block")
+    if np.any(np.isinf(values)):
+        raise ValueError(f"{variable_name} must not contain infinite values")
+    if np.any(~np.isfinite(values[..., ocean_mask])):
+        raise ValueError(
+            f"{variable_name} must not contain NaN or infinite values "
+            "within active model ocean"
+        )
+
+
+def _validated_masked_wind_block(
+    values: np.ndarray,
+    ocean_mask: np.ndarray,
+    *,
+    variable_name: str,
+) -> np.ndarray:
+    """Validate one lazy wind block against its matching ocean-mask block."""
+    if ocean_mask.shape[0] != 1:
+        raise ValueError("lazy ocean-mask blocks must have a singleton time axis")
+    _validate_masked_wind(values, ocean_mask[0], variable_name)
+    return values
+
+
+def _extend_exterior_wind(
+    values: np.ndarray | da.Array,
+    ocean_mask: np.ndarray,
+) -> np.ndarray | da.Array:
+    """Extend ocean values one cell across walls and zero the far exterior.
+
+    Curl and off-grid boundary interpolation each need one forcing cell beyond
+    the strict regional interior. Missing halo cells copy their nearest ocean
+    neighbour, which imposes a locally constant extension instead of the sharp
+    jump that would result from replacing the exterior directly with zero.
+    Cells farther from every regional boundary cannot enter a model stencil
+    and are set to zero only after the one-cell extension has been constructed.
+    """
+    if values.shape[-2:] != ocean_mask.shape:
+        raise ValueError("ocean mask does not match the wind forcing grid")
+    halo = ndimage.binary_dilation(
+        ocean_mask, structure=np.ones((3, 3), dtype=bool)
+    ) & ~ocean_mask
+    nearest = ndimage.distance_transform_edt(
+        ~ocean_mask,
+        return_distances=False,
+        return_indices=True,
+    )
+    rows, columns = np.indices(ocean_mask.shape)
+    output = values
+    roll = da.roll if isinstance(values, da.Array) else np.roll
+    where = da.where if isinstance(values, da.Array) else np.where
+    isnan = da.isnan if isinstance(values, da.Array) else np.isnan
+    for row_offset in (-1, 0, 1):
+        for column_offset in (-1, 0, 1):
+            targets = (
+                halo
+                & (nearest[0] - rows == row_offset)
+                & (nearest[1] - columns == column_offset)
+            )
+            if not np.any(targets):
+                continue
+            shifted = roll(
+                values,
+                shift=(-row_offset, -column_offset),
+                axis=(-2, -1),
+            )
+            output = where(
+                targets[None, :, :] & isnan(output),
+                shifted,
+                output,
+            )
+    return where(isnan(output), 0.0, output)
 
 
 def _regional_ekman_block(
