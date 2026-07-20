@@ -285,14 +285,10 @@ def test_nonzero_dc_forcing_is_rejected():
 
 
 def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
-    """The temporal solve applies one FFT contract in both directions."""
+    """The temporal solve preserves the monthly time coordinate."""
     input_forcing = temporal_forcing()
-    spacing = 365.25 / 12 * 24 * 60 * 60
 
-    result = GlobalRossbyModel(geometry(), 0.02).solve(
-        input_forcing,
-        sample_spacing_seconds=spacing,
-    )
+    result = GlobalRossbyModel(geometry(), 0.02).solve(input_forcing)
 
     assert set(result) == {"h_e", "h_b", "h_w", "h", "T", "T_g", "T_Ek"}
     np.testing.assert_array_equal(result.time, input_forcing.time)
@@ -322,19 +318,10 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
 def test_solve_accepts_nans_only_outside_model_ocean() -> None:
     """Exterior NaNs produce the same zero-wind solution as finite zeros."""
     masked_forcing, _ = nan_masked_temporal_forcing()
-    spacing = 365.25 / 12 * 24 * 60 * 60
     model = GlobalRossbyModel(geometry(), 0.02)
 
-    expected = model.solve(
-        temporal_forcing(),
-        pad_length=0,
-        sample_spacing_seconds=spacing,
-    ).compute()
-    actual = model.solve(
-        masked_forcing,
-        pad_length=0,
-        sample_spacing_seconds=spacing,
-    ).compute()
+    expected = model.solve(temporal_forcing(), pad_length=0).compute()
+    actual = model.solve(masked_forcing, pad_length=0).compute()
 
     xr.testing.assert_allclose(actual, expected)
 
@@ -349,7 +336,6 @@ def test_solve_rejects_nan_inside_model_ocean() -> None:
     result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         pad_length=0,
-        sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
     )
 
     with pytest.raises(ValueError, match="M_Ek_x.*active model ocean"):
@@ -371,6 +357,30 @@ def test_exterior_nan_extension_copies_nearest_ocean_values() -> None:
     assert np.all(extended[:, :, (0, 4)] == 0.0)
 
 
+def test_solve_requires_first_day_month_labels() -> None:
+    input_forcing = temporal_forcing().assign_coords(
+        time=temporal_forcing().time + np.timedelta64(14, "D")
+    )
+
+    with pytest.raises(ValueError, match="first day of each month"):
+        GlobalRossbyModel(geometry(), 0.02).solve(
+            input_forcing,
+            pad_length=0,
+        )
+
+
+def test_solve_requires_contiguous_months() -> None:
+    input_forcing = temporal_forcing().assign_coords(
+        time=np.array(
+            ["2000-01-01", "2000-02-01", "2000-04-01", "2000-05-01"],
+            dtype="datetime64[D]",
+        )
+    )
+
+    with pytest.raises(ValueError, match="months must be contiguous"):
+        GlobalRossbyModel(geometry(), 0.02).solve(input_forcing, pad_length=0)
+
+
 def test_solve_builds_all_outputs_lazily() -> None:
     """Constructing the model result must not execute graph tasks."""
     executed = []
@@ -378,7 +388,6 @@ def test_solve_builds_all_outputs_lazily() -> None:
         result = GlobalRossbyModel(geometry(), 0.02).solve(
             temporal_forcing(),
             pad_length=0,
-            sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
         )
 
     assert executed == []
@@ -402,7 +411,6 @@ def test_nan_masked_solve_builds_all_outputs_lazily() -> None:
         result = GlobalRossbyModel(geometry(), 0.02).solve(
             input_forcing,
             pad_length=0,
-            sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
         )
 
     assert executed == []
@@ -421,7 +429,6 @@ def test_height_field_retains_float32_spatial_precision() -> None:
     result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         pad_length=0,
-        sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
     )
 
     assert result.h.dtype == np.float32
@@ -445,7 +452,6 @@ def test_solve_transforms_derived_ekman_fields_not_both_winds(
     GlobalRossbyModel(geometry(), 0.02).solve(
         temporal_forcing(),
         pad_length=0,
-        sample_spacing_seconds=365.25 / 12 * 24 * 60 * 60,
     )
 
     assert transformed == [
@@ -469,14 +475,10 @@ def test_temporal_preprocessing_matches_internal_frequency_kernel() -> None:
         ("time", "latitude", "longitude"),
         phase * (2.0 + latitude / 100.0 + 0.0 * longitude),
     )
-    spacing = 365.25 / 12 * 24 * 60 * 60
+    spacing = global_rossby._MODEL_MONTH_SECONDS
     model = GlobalRossbyModel(geometry(), 0.02)
 
-    temporal = model.solve(
-        input_forcing,
-        pad_length=0,
-        sample_spacing_seconds=spacing,
-    )
+    temporal = model.solve(input_forcing, pad_length=0)
     forcing_hat = xr.Dataset(
         {
             name: forward_transform(
@@ -517,37 +519,17 @@ def test_frequency_kernel_is_not_public() -> None:
 def test_default_padding_covers_longest_crossing_time() -> None:
     """Automatic padding matches an explicit crossing-time sample count."""
     input_forcing = temporal_forcing()
-    spacing = 365.25 / 12 * 24 * 60 * 60
+    spacing = global_rossby._MODEL_MONTH_SECONDS
     model = GlobalRossbyModel(geometry(), 0.02)
     expected_pad_length = int(
         np.ceil(model.longest_crossing_time_seconds / spacing)
     )
 
-    automatic = model.solve(
-        input_forcing,
-        sample_spacing_seconds=spacing,
-    )
+    automatic = model.solve(input_forcing)
     explicit = model.solve(
         input_forcing,
         pad_length=expected_pad_length,
-        sample_spacing_seconds=spacing,
     )
 
     assert model.longest_crossing_time_seconds > 0.0
     xr.testing.assert_allclose(automatic, explicit)
-
-
-def test_solve_infers_daily_spacing() -> None:
-    """A uniform daily grid needs no explicit physical interval."""
-    input_forcing = temporal_forcing().assign_coords(
-        time=np.datetime64("2000-01-01")
-        + np.arange(4) * np.timedelta64(1, "D")
-    )
-
-    result = GlobalRossbyModel(geometry(), 0.02).solve(
-        input_forcing,
-        pad_length=0,
-    )
-
-    np.testing.assert_array_equal(result.time, input_forcing.time)
-    assert "omega" not in result.dims

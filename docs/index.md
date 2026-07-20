@@ -249,6 +249,42 @@ The forcing dataset contains three required data arrays:
 
 All three use a common time grid, which is also used for the solve. The Ekman
 transports use a latitude–longitude grid that covers the entire active domain.
+The two wind components are collocated at each latitude–longitude point: this
+is an unstaggered grid (often called an A-grid), not a C-grid. `T_N` has no
+spatial grid because it is the transport integrated across the prescribed
+northern boundary.
+
+#### Monthly forcing convention
+
+Every model forcing value is assumed to be a calendar-month mean. The shared
+time coordinate is a contiguous sequence containing the first day of every
+month. That coordinate is the complete temporal contract: the model validates
+it and does not support another forcing cadence or interpretation.
+
+Both raw ERA5 wind stress and raw SCOTIA transport are already calendar-month
+means. Their source files use different timestamps to label the month, but
+those timestamps are not observation instants. The v3 construction notebook
+matches the records by calendar year and month, replaces the source labels
+with the first day of the month, and verifies that there are no gaps.
+
+No averaging transfer function is applied in the Fourier transforms. Let $A$
+denote calendar-month averaging and let $H$ denote the linear, time-invariant
+adjustment model. They commute, so for an underlying forcing $x$,
+
+$$
+\overline{y}=A(Hx)=H(Ax)=H\overline{x}.
+$$
+
+The supplied sequence $\overline{x}$ can therefore be transformed directly;
+the spectral solver applies the physical model response $H(\omega)$ to each
+Fourier component and the inverse transform returns the monthly-mean response.
+Explicitly removing and restoring the boxcar response would cancel and would
+not change the result.
+
+The FFT uses one nominal model month of $365.25/12$ days to map Fourier modes
+to angular frequency and propagation phase. Treating unequal calendar months
+as equal spectral intervals remains the numerical approximation.
+
 The model retains North Atlantic rows at or south of the prescribed `T_N`
 latitude, without changing the Indian or Pacific limits. The latitude must not
 fall south of the equator, and both the forcing grid and Atlantic boundary
