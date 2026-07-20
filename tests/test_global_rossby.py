@@ -122,7 +122,7 @@ def test_unforced_wind_solution_closes_regional_budgets():
                     row.longitude[-1].item()
                     - geometry().x_eA.sel(latitude=latitude).item()
                 )
-                / global_rossby._rossby_speed(
+                / global_rossby.rossby_speed(
                     np.asarray([latitude]), 0.02, 1000.0
                 )[0]
             ),
@@ -216,7 +216,7 @@ def test_height_field_uses_grid_points_between_off_grid_boundaries():
         row = field.sel(latitude=latitude).dropna("longitude")
         assert row.longitude[0] == -60.0
         assert row.longitude[-1] == 10.0
-        speed = global_rossby._rossby_speed(
+        speed = global_rossby.rossby_speed(
             np.asarray([latitude]), 0.02, 1000.0
         )[0]
         expected = result.h_e.sel(region="north_atlantic").isel(
