@@ -61,37 +61,17 @@ def test_lazy_round_trip_remains_dask_backed() -> None:
     xr.testing.assert_allclose(restored.compute(), data.compute())
 
 
-def test_forward_rejects_nonzero_mean_by_default() -> None:
+def test_forward_retains_nonzero_mean() -> None:
     data = xr.DataArray([1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": _time()})
 
-    with pytest.raises(ValueError, match="must be zero mean"):
-        forward_transform(data)
-
-    spectrum = forward_transform(data, require_zero_mean=False)
-    assert spectrum.isel(omega=0).item() == pytest.approx(10.0)
-
-
-def test_forward_accepts_float32_residual_means_against_field_scale() -> None:
-    """Accepted float32 demeaning residuals are projected to exact zero DC."""
-    data = xr.DataArray(
-        np.array(
-            [[100.0, -100.0, 100.0, -100.0], [1e-3, -1e-3, 1e-3, -0.999e-3]],
-            dtype=np.float32,
-        ),
-        dims=("point", "time"),
-        coords={"time": _time()},
-    )
-
     spectrum = forward_transform(data)
-
-    assert spectrum.sizes["omega"] == 3
-    np.testing.assert_array_equal(spectrum.isel(omega=0), 0.0)
+    assert spectrum.isel(omega=0).item() == pytest.approx(10.0)
 
 
 def test_inverse_accepts_real_nonzero_dc() -> None:
     data = xr.DataArray([1.0, 2.0, 3.0, 4.0], dims="time", coords={"time": _time()})
 
-    spectrum = forward_transform(data, require_zero_mean=False)
+    spectrum = forward_transform(data)
     restored = inverse_transform(spectrum)
 
     xr.testing.assert_allclose(restored, data)

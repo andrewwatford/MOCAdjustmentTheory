@@ -126,16 +126,13 @@ F_3-T_{P,\mathrm{Ek}}
 \end{bmatrix}.
 $$
 
-At zero frequency, zero-mean forcing leaves one part of this system
-undetermined: adding the same constant to $\widehat h_e^{(A)}(0)$,
-$\widehat h_e^{(I)}(0)$, and $\widehat h_e^{(P)}(0)$ does not change any
-thickness difference or transport. The solver chooses this common offset to be
-zero, so the three zero-frequency $h_e$ coefficients vanish. Equivalently,
-$h_e$ has zero mean over the full padded FFT interval. This does not require
-the returned time series to have zero sample mean after the padded solution is
-cropped to the original time coordinate. A nonzero absolute mean thickness
-would require an additional volume or initial condition that is not part of
-the forcing dataset.
+At zero frequency, $F_j=r_j=0$ and the matrix has rank two. The forcing means
+are retained, and a steady solution exists when $T_N(0)=T_S(0)$. Nonzero
+$T_{I,\mathrm{Ek}}(0)$ and $T_{P,\mathrm{Ek}}(0)$ then determine the mean
+thickness differences. The solver uses the Moore--Penrose solution, imposing
+$h_e^{(A)}(0)+h_e^{(I)}(0)+h_e^{(P)}(0)=0$ on the otherwise undetermined
+common offset. If $T_N(0)\ne T_S(0)$, the zero-frequency transport budget is
+incompatible and the solver raises an error.
 
 The partial regional budget gives total transport at any supported latitude:
 

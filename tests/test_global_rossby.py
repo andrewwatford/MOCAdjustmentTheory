@@ -258,8 +258,35 @@ def test_boundary_solution_satisfies_three_basin_system():
     np.testing.assert_allclose(matrix @ h, rhs)
 
 
-def test_nonzero_dc_forcing_is_rejected():
-    with pytest.raises(ValueError, match="zero-frequency forcing"):
+def test_zero_frequency_boundary_solution_uses_minimum_norm_gauge():
+    omega = np.array([0.0])
+    f_term = np.zeros((1, 5), dtype=complex)
+    r = np.zeros((1, 5), dtype=complex)
+    t_n = t_s = np.array([7.0 + 0j])
+    t_i = np.array([8.0 + 0j])
+    t_p = np.array([9.0 + 0j])
+    k_i, k_p = -20.0, -30.0
+
+    h = GlobalRossbyModel._solve_boundaries(
+        omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p
+    )[0]
+    matrix = np.array(
+        [
+            [k_i, k_p - k_i, -k_p],
+            [-k_i, k_i, 0.0],
+            [0.0, -k_p, k_p],
+        ]
+    )
+    rhs = np.array([t_i[0] + t_p[0], -t_i[0], -t_p[0]])
+
+    np.testing.assert_allclose(matrix @ h, rhs)
+    np.testing.assert_allclose(h.sum(), 0.0, atol=1e-15)
+    np.testing.assert_allclose(h[1] - h[0], -t_i[0] / k_i)
+    np.testing.assert_allclose(h[2] - h[1], -t_p[0] / k_p)
+
+
+def test_incompatible_zero_frequency_transport_is_rejected():
+    with pytest.raises(ValueError, match="transport imbalance"):
         GlobalRossbyModel(geometry(), 0.02)._solve_frequency(
             forcing(t_n=(1.0, 0.0))
         )
@@ -294,6 +321,38 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     np.testing.assert_allclose(result.T, result.T_g + result.T_Ek, equal_nan=True)
     for name in result.data_vars:
         assert np.all(np.isfinite(result[name].fillna(0)))
+
+
+def test_solve_retains_nonzero_mean_wind_forcing() -> None:
+    input_forcing = temporal_forcing()
+    input_forcing["T_N"][:] = 0.0
+    longitude_profile = 1.0 + input_forcing.longitude.values / 400.0
+    values = np.broadcast_to(
+        longitude_profile[None, None, :],
+        input_forcing["M_Ek_x"].shape,
+    ).copy()
+    input_forcing["M_Ek_x"] = (
+        ("time", "latitude", "longitude"),
+        values,
+    )
+
+    result = GlobalRossbyModel(geometry(), 0.02).solve(
+        input_forcing, pad_length=0
+    )
+    height = result.h.compute()
+
+    assert np.any(np.abs(height.fillna(0.0)) > 0.0)
+
+
+def test_lazy_solve_rejects_incompatible_zero_frequency_transport() -> None:
+    input_forcing = temporal_forcing()
+    input_forcing["T_N"][:] = 1.0e6
+    result = GlobalRossbyModel(geometry(), 0.02).solve(
+        input_forcing, pad_length=0
+    )
+
+    with pytest.raises(ValueError, match="transport imbalance"):
+        result.h_e.compute()
 
 
 def test_solve_rejects_nan_in_differentiated_forcing_field() -> None:

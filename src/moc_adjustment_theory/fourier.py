@@ -17,8 +17,6 @@ def forward_transform(
     *,
     time_dim: str = "time",
     pad_length: int = 0,
-    require_zero_mean: bool = True,
-    zero_mean_rtol: float = 1e-7,
     sample_spacing_seconds: float | None = None,
 ) -> xr.DataArray:
     """Transform real, uniformly sampled data to angular-frequency space.
@@ -27,19 +25,13 @@ def forward_transform(
     samples on the right. One additional zero is appended when needed to make
     the full transform length odd, avoiding a self-conjugate Nyquist bin when
     the model applies complex travel-time phases. Angular frequency is returned
-    in rad/s. No detrending or window is applied. By default, each time series
-    must have a mean no larger than
-    ``zero_mean_rtol`` times the field-wide maximum absolute value. Accepted
-    roundoff-level means are set exactly to zero in frequency space.
+    in rad/s. No detrending, demeaning, or window is applied.
     ``sample_spacing_seconds`` may explicitly supply the physical sample
     interval for monotonically increasing but nonuniform calendar labels. For
     monthly data, this project uses ``365.25 / 12`` days per sample. Metadata
     needed for an exact, stateless inverse is attached to the result.
     """
     _validate_forward_contract(time_dim, pad_length)
-    if not isinstance(require_zero_mean, bool):
-        raise TypeError("require_zero_mean must be a bool")
-    _validate_tolerance(zero_mean_rtol, "zero_mean_rtol")
     _validate_sample_spacing(sample_spacing_seconds)
     if not isinstance(data, xr.DataArray):
         raise TypeError("data must be an xarray.DataArray")
@@ -60,25 +52,9 @@ def forward_transform(
             _validated_real_finite_block,
             dtype=values.dtype,
         )
-        if require_zero_mean:
-            field_scale = da.max(da.absolute(values))
-            indices = tuple(range(values.ndim))
-            values = da.blockwise(
-                _validated_zero_mean_block,
-                indices,
-                values,
-                indices,
-                field_scale,
-                (),
-                axis=axis,
-                zero_mean_rtol=zero_mean_rtol,
-                dtype=values.dtype,
-            )
     else:
         values = np.asarray(values)
         _validate_real_finite(values, "data")
-        if require_zero_mean:
-            _validate_zero_mean(values, axis, zero_mean_rtol)
 
     original_length = data.sizes[time_dim]
     padded_length = _padded_length(original_length, pad_length)
@@ -88,19 +64,6 @@ def forward_transform(
         transformed = fft.rfft(
             values, n=padded_length, axis=axis, workers=-1
         )
-    if require_zero_mean:
-        # The anomaly contract is exact in spectral space even when float32
-        # storage leaves a small residual after demeaning.
-        index = [slice(None)] * transformed.ndim
-        index[axis] = 0
-        if isinstance(transformed, da.Array):
-            transformed = transformed.map_blocks(
-                _zero_dc_block,
-                axis=axis,
-                dtype=transformed.dtype,
-            )
-        else:
-            transformed[tuple(index)] = 0.0
     omega = 2.0 * np.pi * fft.rfftfreq(padded_length, d=dt_seconds)
     dims = tuple(_OMEGA_DIM if dim == time_dim else dim for dim in data.dims)
     coords = {
@@ -455,32 +418,6 @@ def _validated_real_finite_block(values: np.ndarray) -> np.ndarray:
     return values
 
 
-def _validated_zero_mean_block(
-    values: np.ndarray,
-    field_scale: np.ndarray,
-    *,
-    axis: int,
-    zero_mean_rtol: float,
-) -> np.ndarray:
-    """Validate complete time series against the lazy global field scale."""
-    means = np.abs(np.mean(values, axis=axis))
-    if np.any(means > zero_mean_rtol * float(field_scale)):
-        raise ValueError(
-            "each time series must be zero mean; pass "
-            "require_zero_mean=False to retain a nonzero mean"
-        )
-    return values
-
-
-def _zero_dc_block(values: np.ndarray, *, axis: int) -> np.ndarray:
-    """Project the zero-frequency coefficient of one block to zero."""
-    values = values.copy()
-    index = [slice(None)] * values.ndim
-    index[axis] = 0
-    values[tuple(index)] = 0.0
-    return values
-
-
 def _validated_spectrum_block(
     values: np.ndarray,
     *,
@@ -494,19 +431,6 @@ def _validated_spectrum_block(
     if np.any(dc_imaginary > imaginary_rtol * scale):
         raise ValueError("spectrum is inconsistent with a real time series")
     return values
-
-
-def _validate_zero_mean(
-    values: np.ndarray, axis: int, zero_mean_rtol: float
-) -> None:
-    """Require every series along ``axis`` to have negligible mean."""
-    means = np.abs(np.mean(values, axis=axis))
-    field_scale = np.max(np.abs(values))
-    if np.any(means > zero_mean_rtol * field_scale):
-        raise ValueError(
-            "each time series must be zero mean; pass "
-            "require_zero_mean=False to retain a nonzero mean"
-        )
 
 
 def _metadata_int(

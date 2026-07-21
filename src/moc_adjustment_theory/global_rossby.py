@@ -14,9 +14,7 @@ from .fourier import (
     _METADATA_KEY,
     _validate_real_finite,
     _validate_real_dtype,
-    _validate_zero_mean,
     _validated_real_finite_block,
-    _validated_zero_mean_block,
     _validated_time,
     forward_transform,
     inverse_transform,
@@ -96,8 +94,6 @@ class GlobalRossbyModel:
         *,
         time_dim: str = "time",
         pad_length: int | None = None,
-        require_zero_mean: bool = True,
-        zero_mean_rtol: float = 1e-7,
         imaginary_rtol: float = 1e-12,
     ) -> xr.Dataset:
         """Solve temporal forcing and return temporal model diagnostics.
@@ -138,9 +134,6 @@ class GlobalRossbyModel:
             least the longest model crossing time in units of the forcing time
             step. One additional sample is used when needed to make the full
             FFT length odd.
-        require_zero_mean, zero_mean_rtol
-            Whether to enforce forcing anomalies and the field-scale relative
-            tolerance used before projecting accepted DC residuals to zero.
         imaginary_rtol
             Relative tolerance for spectral components that must be real.
         Returns
@@ -185,8 +178,6 @@ class GlobalRossbyModel:
         }
         t_n_hat = forward_transform(
             forcing_lazy["T_N"],
-            require_zero_mean=require_zero_mean,
-            zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
 
@@ -200,8 +191,6 @@ class GlobalRossbyModel:
         latitude, longitude, mx, my = self._temporal_wind_arrays(
             forcing_lazy,
             time_dim,
-            require_zero_mean,
-            zero_mean_rtol,
         )
         # These spatial linear operations commute with the temporal FFT.
         w_ek = self._ekman_curl(mx, my, latitude, longitude)
@@ -232,15 +221,11 @@ class GlobalRossbyModel:
         )
         w_ek_hat = forward_transform(
             w_ek_array,
-            require_zero_mean=require_zero_mean,
-            zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
         del w_ek, w_ek_array
         t_ek_hat = forward_transform(
             t_ek_array,
-            require_zero_mean=require_zero_mean,
-            zero_mean_rtol=zero_mean_rtol,
             **transform_options,
         )
 
@@ -429,6 +414,14 @@ class GlobalRossbyModel:
             ),
             axis=1,
         )
+        rhs = da.map_blocks(
+            _validated_boundary_rhs_block,
+            rhs.rechunk({0: -1, 1: -1}),
+            t_n.rechunk({0: -1})[:, None],
+            t_s.rechunk({0: -1})[:, None],
+            omega=omega,
+            dtype=rhs.dtype,
+        )
         inverse = self._boundary_inverse(
             omega, full_r, kappa_i, kappa_p
         )
@@ -531,12 +524,12 @@ class GlobalRossbyModel:
         kappa_i: float,
         kappa_p: float,
     ) -> np.ndarray:
-        """Return the inverse boundary matrix at every nonzero frequency."""
+        """Return the inverse or minimum-norm inverse boundary matrix."""
         inverse = np.zeros((omega.size, 3, 3), dtype=complex)
         zero = np.isclose(
             omega, 0.0, rtol=0.0, atol=np.finfo(float).eps
         )
-        for n in np.flatnonzero(~zero):
+        for n in range(omega.size):
             matrix = np.array(
                 [
                     [
@@ -549,7 +542,9 @@ class GlobalRossbyModel:
                 ],
                 dtype=complex,
             )
-            inverse[n] = np.linalg.inv(matrix)
+            inverse[n] = (
+                np.linalg.pinv(matrix) if zero[n] else np.linalg.inv(matrix)
+            )
         return inverse
 
     @staticmethod
@@ -808,8 +803,6 @@ class GlobalRossbyModel:
     def _temporal_wind_arrays(
         forcing_ds: xr.Dataset,
         time_dim: str,
-        require_zero_mean: bool,
-        zero_mean_rtol: float,
     ):
         """Validate and return temporal Ekman-transport arrays."""
         latitude, longitude = GlobalRossbyModel._forcing_coordinates(
@@ -833,25 +826,9 @@ class GlobalRossbyModel:
                     _validated_real_finite_block,
                     dtype=raw_values.dtype,
                 )
-                if require_zero_mean:
-                    field_scale = da.max(da.absolute(values))
-                    indices = tuple(range(values.ndim))
-                    values = da.blockwise(
-                        _validated_zero_mean_block,
-                        indices,
-                        values,
-                        indices,
-                        field_scale,
-                        (),
-                        axis=0,
-                        zero_mean_rtol=zero_mean_rtol,
-                        dtype=values.dtype,
-                    )
             else:
                 values = np.asarray(raw_values)
                 _validate_real_finite(values, name)
-                if require_zero_mean:
-                    _validate_zero_mean(values, 0, zero_mean_rtol)
             arrays.append(values)
 
         wind_dtype = np.result_type(
@@ -1287,7 +1264,18 @@ class GlobalRossbyModel:
                 ).astype(dtype)
                 unphased = da.sum(weighted, axis=1)
                 phased = da.sum(phase * weighted, axis=1)
-                q_f.append(phased - unphased)
+                q_f.append(
+                    da.where(
+                        np.isclose(
+                            omega,
+                            0.0,
+                            rtol=0.0,
+                            atol=np.finfo(float).eps,
+                        ),
+                        0.0,
+                        phased - unphased,
+                    )
+                )
                 source.append(phased / c[rule.latitude_index])
             return da.stack(q_f, axis=1), da.stack(source, axis=1)
         q_f = np.empty((omega.size, len(rules)), dtype=complex)
@@ -1306,6 +1294,12 @@ class GlobalRossbyModel:
             unphased = np.sum(weighted, axis=1)
             phased = np.sum(phase * weighted, axis=1)
             q_f[:, j] = phased - unphased
+            q_f[
+                np.isclose(
+                    omega, 0.0, rtol=0.0, atol=np.finfo(float).eps
+                ),
+                j,
+            ] = 0.0
             source[:, j] = phased / c[rule.latitude_index]
         return q_f, source
 
@@ -1363,7 +1357,6 @@ class GlobalRossbyModel:
     @staticmethod
     def _solve_boundaries(omega, f_term, r, t_n, t_i, t_p, t_s, k_i, k_p):
         """Solve the three-basin boundary-thickness system at each frequency."""
-        h = np.zeros((omega.size, 3), dtype=complex)
         rhs = np.column_stack(
             (
                 f_term[:, 0] + f_term[:, 3] + f_term[:, 4] + t_n + t_i + t_p - t_s,
@@ -1371,21 +1364,32 @@ class GlobalRossbyModel:
                 f_term[:, 2] - t_p,
             )
         )
-        zero = np.isclose(omega, 0.0, rtol=0.0, atol=np.finfo(float).eps)
-        tolerance = 1e-10 * max(1.0, float(np.max(np.abs(rhs))))
-        if np.any(np.abs(rhs[zero]) > tolerance):
-            raise ValueError("zero-frequency forcing must vanish")
-        for n in np.flatnonzero(~zero):
-            matrix = np.array(
-                [
-                    [r[n, 0] + k_i, r[n, 3] + k_p - k_i, r[n, 4] - k_p],
-                    [-k_i, r[n, 1] + k_i, 0.0],
-                    [0.0, -k_p, r[n, 2] + k_p],
-                ],
-                dtype=complex,
-            )
-            h[n] = np.linalg.solve(matrix, rhs[n])
-        return h
+        rhs = _validated_boundary_rhs_block(
+            rhs, t_n[:, None], t_s[:, None], omega=omega
+        )
+        inverse = GlobalRossbyModel._boundary_inverse(omega, r, k_i, k_p)
+        return np.einsum("nij,nj->ni", inverse, rhs)
+
+
+def _validated_boundary_rhs_block(
+    rhs: np.ndarray,
+    t_n: np.ndarray,
+    t_s: np.ndarray,
+    *,
+    omega: np.ndarray,
+) -> np.ndarray:
+    """Require the zero-frequency transport budget to be compatible."""
+    zero = np.isclose(omega, 0.0, rtol=0.0, atol=np.finfo(float).eps)
+    if not np.any(zero):
+        return rhs
+    boundary_transport = np.column_stack((t_n.ravel(), t_s.ravel()))
+    dc_transport = boundary_transport[zero]
+    tolerance = 1e-10 * max(1.0, float(np.max(np.abs(dc_transport))))
+    if np.any(np.abs(dc_transport[:, 0] - dc_transport[:, 1]) > tolerance):
+        raise ValueError(
+            "zero-frequency transport imbalance requires T_N to equal T_S"
+        )
+    return rhs
 
 
 def _regional_ekman_block(
@@ -1476,7 +1480,13 @@ def _zonal_terms_spectral_block(
             )
             unphased = np.sum(weighted, axis=1)
             phased = np.sum(phase * weighted, axis=1)
-            output[0, :, region, local_latitude] = phased - unphased
+            q_f = phased - unphased
+            q_f[
+                np.isclose(
+                    omega, 0.0, rtol=0.0, atol=np.finfo(float).eps
+                )
+            ] = 0.0
+            output[0, :, region, local_latitude] = q_f
             output[1, :, region, local_latitude] = (
                 phased / c[rule.latitude_index]
             )
