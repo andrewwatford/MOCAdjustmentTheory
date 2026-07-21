@@ -296,10 +296,12 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         assert np.all(np.isfinite(result[name].fillna(0)))
 
 
-def test_solve_rejects_nan_anywhere_in_forcing_field() -> None:
-    """The model requires the forcing producer to supply a finite field."""
+def test_solve_rejects_nan_in_differentiated_forcing_field() -> None:
+    """A NaN encountered by the naive spatial derivative remains invalid."""
     input_forcing = temporal_forcing()
-    input_forcing["M_Ek_x"].values[:, 0, 0] = np.nan
+    input_forcing["M_Ek_x"].loc[
+        {"latitude": 0.0, "longitude": 0.0}
+    ] = np.nan
     result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         pad_length=0,
