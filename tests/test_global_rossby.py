@@ -87,25 +87,6 @@ def temporal_forcing():
     return dataset
 
 
-def nan_masked_temporal_forcing():
-    """Return temporal forcing with NaNs outside the modelled ocean union."""
-    dataset = temporal_forcing()
-    model = GlobalRossbyModel(geometry(), 0.02)
-    latitude, longitude = model._forcing_coordinates(dataset)
-    regional_geometry = model._geometry(latitude, 60.0)
-    quadrature = model._zonal_quadrature(
-        longitude, latitude, regional_geometry
-    )
-    ocean_mask = model._active_ocean_mask(
-        latitude.size, longitude.size, quadrature
-    )
-    for name in ("M_Ek_x", "M_Ek_y"):
-        values = dataset[name].values.copy()
-        values[:, ~ocean_mask] = np.nan
-        dataset[name] = (dataset[name].dims, values)
-    return dataset, ocean_mask
-
-
 def test_unforced_wind_solution_closes_regional_budgets():
     result = GlobalRossbyModel(geometry(), 0.02)._solve_frequency(forcing())
 
@@ -315,46 +296,19 @@ def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
         assert np.all(np.isfinite(result[name].fillna(0)))
 
 
-def test_solve_accepts_nans_only_outside_model_ocean() -> None:
-    """Exterior NaNs produce the same zero-wind solution as finite zeros."""
-    masked_forcing, _ = nan_masked_temporal_forcing()
-    model = GlobalRossbyModel(geometry(), 0.02)
-
-    expected = model.solve(temporal_forcing(), pad_length=0).compute()
-    actual = model.solve(masked_forcing, pad_length=0).compute()
-
-    xr.testing.assert_allclose(actual, expected)
-
-
-def test_solve_rejects_nan_inside_model_ocean() -> None:
-    """An active-ocean NaN remains an input error with a specific message."""
-    input_forcing, ocean_mask = nan_masked_temporal_forcing()
-    latitude_index, longitude_index = np.argwhere(ocean_mask)[0]
-    input_forcing["M_Ek_x"].values[
-        :, latitude_index, longitude_index
+def test_solve_rejects_nan_in_differentiated_forcing_field() -> None:
+    """A NaN encountered by the naive spatial derivative remains invalid."""
+    input_forcing = temporal_forcing()
+    input_forcing["M_Ek_x"].loc[
+        {"latitude": 0.0, "longitude": 0.0}
     ] = np.nan
     result = GlobalRossbyModel(geometry(), 0.02).solve(
         input_forcing,
         pad_length=0,
     )
 
-    with pytest.raises(ValueError, match="M_Ek_x.*active model ocean"):
+    with pytest.raises(ValueError, match="data must not contain NaN"):
         result.h_e.compute()
-
-
-def test_exterior_nan_extension_copies_nearest_ocean_values() -> None:
-    """The one-cell stencil halo uses a constant nearest-ocean extension."""
-    ocean_mask = np.zeros((5, 5), dtype=bool)
-    ocean_mask[2, 2] = True
-    values = np.full((2, 5, 5), np.nan)
-    values[:, 2, 2] = (3.0, -2.0)
-
-    extended = global_rossby._extend_exterior_wind(values, ocean_mask)
-
-    np.testing.assert_allclose(extended[0, 1:4, 1:4], 3.0)
-    np.testing.assert_allclose(extended[1, 1:4, 1:4], -2.0)
-    assert np.all(extended[:, (0, 4), :] == 0.0)
-    assert np.all(extended[:, :, (0, 4)] == 0.0)
 
 
 def test_solve_requires_first_day_month_labels() -> None:
@@ -400,23 +354,6 @@ def test_solve_builds_all_outputs_lazily() -> None:
         "region",
         "latitude",
         "longitude",
-    )
-
-
-def test_nan_masked_solve_builds_all_outputs_lazily() -> None:
-    """Geometry-aware NaN validation and extension must remain deferred."""
-    input_forcing, _ = nan_masked_temporal_forcing()
-    executed = []
-    with Callback(pretask=lambda key, graph, state: executed.append(key)):
-        result = GlobalRossbyModel(geometry(), 0.02).solve(
-            input_forcing,
-            pad_length=0,
-        )
-
-    assert executed == []
-    assert all(
-        isinstance(array.data, Array)
-        for array in result.data_vars.values()
     )
 
 
