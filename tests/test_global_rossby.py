@@ -292,6 +292,22 @@ def test_incompatible_zero_frequency_transport_is_rejected():
         )
 
 
+def test_negligible_zero_frequency_transport_residual_is_accepted():
+    """FFT round-off is judged relative to the full transport spectrum."""
+    rhs = np.zeros((2, 3), dtype=complex)
+    t_n = np.array([[2.5e-10], [1.0e5 + 2.0e5j]])
+    t_s = np.zeros((2, 1), dtype=complex)
+
+    result = global_rossby._validated_boundary_rhs_block(
+        rhs,
+        t_n,
+        t_s,
+        omega=np.array([0.0, 1.0]),
+    )
+
+    assert result is rhs
+
+
 def test_solve_transforms_monthly_forcing_and_restores_time() -> None:
     """The temporal solve preserves the monthly time coordinate."""
     input_forcing = temporal_forcing()

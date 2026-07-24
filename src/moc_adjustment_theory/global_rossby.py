@@ -1384,7 +1384,8 @@ def _validated_boundary_rhs_block(
         return rhs
     boundary_transport = np.column_stack((t_n.ravel(), t_s.ravel()))
     dc_transport = boundary_transport[zero]
-    tolerance = 1e-10 * max(1.0, float(np.max(np.abs(dc_transport))))
+    transport_scale = float(np.max(np.abs(boundary_transport)))
+    tolerance = 1e-10 * max(1.0, transport_scale)
     if np.any(np.abs(dc_transport[:, 0] - dc_transport[:, 1]) > tolerance):
         raise ValueError(
             "zero-frequency transport imbalance requires T_N to equal T_S"
